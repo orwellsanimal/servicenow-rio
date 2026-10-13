@@ -56,3 +56,7 @@ commands, the `now-data` / `now-config` seam, then the Fluent SDK pipeline from 
 
 [`CLAUDE.md`](CLAUDE.md) carries the fleet-canonical engineering block and the rio-specific traps.
 Decisions live in [`docs/architecture/`](docs/architecture/).
+
+## License
+
+[Apache-2.0](LICENSE). Code carried from whitcortex keeps its whitcortex issue numbers in comments for provenance.
