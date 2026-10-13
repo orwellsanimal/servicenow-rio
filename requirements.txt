@@ -1,0 +1,7 @@
+# Pure Python on purpose (ADR-0002: App Control for Business can block unsigned native
+# libraries inside wheels). Anything with a compiled extension needs an import test on the
+# laptop first, recorded on its issue.
+requests==2.34.2
+python-dotenv==1.2.2
+pysnc==1.2.1
+pytest==9.0.2
