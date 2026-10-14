@@ -33,6 +33,33 @@ def _call(fn, **kwargs) -> Any:
         raise ToolError(str(e)) from e
 
 
+def _values(values: Any) -> dict:
+    """now_update's `values`, which the menu offers as a JSON object in a string.
+
+    Ollama 0.23.2 drops a qwen3 tool call whose arguments hold a nested object: the model generates
+    it, and /api/chat returns no content and no tool_calls. A string argument parses. A dict is
+    still accepted, for a model or Ollama that gets nested objects right."""
+    if isinstance(values, dict):
+        return values
+    if isinstance(values, str):
+        try:
+            parsed = json.loads(values)
+        except json.JSONDecodeError as e:
+            raise ToolError(f"values must be a JSON object, e.g. {{\"state\": \"2\"}}; could not parse it: {e}") from e
+        if isinstance(parsed, dict):
+            return parsed
+    raise ToolError(f"values must be a JSON object of field: value pairs, got {type(values).__name__}.")
+
+
+def _has_glide_aggregate() -> bool:
+    """now_aggregate needs GlideAggregate, which released PySNC lacks (ServiceNow/PySNC#146)."""
+    try:
+        from pysnc import ServiceNowClient
+    except ImportError:
+        return False
+    return hasattr(ServiceNowClient, "GlideAggregate")
+
+
 def load() -> list[str]:
     """Register the tools whose prerequisites are present. Returns one line per group for the banner."""
     notes = []
@@ -47,8 +74,8 @@ def load() -> list[str]:
         notes.append(f"now-data tools: off ({problem})")
     else:
         client.configure(config.SN_INSTANCE, *config.sn_credentials())  # now-data normalises it
-        _register_data()
-        notes.append("now-data tools: query, get, aggregate"
+        aggregate = _register_data()
+        notes.append("now-data tools: query, get" + (", aggregate" if aggregate else "")
                      + ("" if config.READ_ONLY else ", update (approval card)")
                      + (" [read-only]" if config.READ_ONLY else ""))
 
@@ -66,12 +93,15 @@ def load() -> list[str]:
     return notes
 
 
-def _register_data() -> None:
+def _register_data() -> bool:
+    """Register the now-data tools. Returns whether now_aggregate was registered."""
     from now_data import verbs as data
 
     @register("now_query", group="servicenow", writes=False)
     def now_query(table: str, query: str = "", fields: str = "", limit: int = 10) -> dict:
-        """Find records on the live instance with an encoded query. Returns {count, truncated, records}.
+        """Find records with an encoded query; also how to look a record up by its number (query number=INC0010001).
+
+        Returns {count, truncated, records} from the live instance.
 
         Args:
           table: table name, e.g. incident, change_request, sys_user
@@ -84,7 +114,7 @@ def _register_data() -> None:
 
     @register("now_get", group="servicenow", writes=False)
     def now_get(table: str, sys_id: str, fields: str = "") -> dict:
-        """Fetch one record from the live instance by its 32-character sys_id.
+        """Fetch one record by its 32-character hex sys_id. NOT for numbers like INC0010001: use now_query.
 
         Args:
           table: table name, e.g. incident
@@ -93,19 +123,22 @@ def _register_data() -> None:
         """
         return _call(data.now_get, table=table, sys_id=sys_id, fields=fields, display_value=True)
 
-    @register("now_aggregate", group="servicenow", writes=False)
-    def now_aggregate(table: str, query: str = "", group_by: str = "") -> dict:
-        """Count records on the live instance, optionally grouped by a field.
+    # Offered only when it can work: released PySNC lacks GlideAggregate, and the model can't fix that.
+    aggregate = _has_glide_aggregate()
+    if aggregate:
+        @register("now_aggregate", group="servicenow", writes=False)
+        def now_aggregate(table: str, query: str = "", group_by: str = "") -> dict:
+            """Count records on the live instance, optionally grouped by a field.
 
-        Args:
-          table: table name, e.g. incident
-          query: encoded query to filter first, e.g. active=true
-          group_by: field to group the counts by, e.g. priority or assignment_group
-        """
-        return _call(data.now_aggregate, table=table, query=query, group_by=group_by, count=True)
+            Args:
+              table: table name, e.g. incident
+              query: encoded query to filter first, e.g. active=true
+              group_by: field to group the counts by, e.g. priority or assignment_group
+            """
+            return _call(data.now_aggregate, table=table, query=query, group_by=group_by, count=True)
 
-    def _update_preview(table: str, sys_id: str, values: dict) -> str:
-        p = _call(data.now_update, table=table, sys_id=sys_id, values=values, confirmed=False)
+    def _update_preview(table: str, sys_id: str, values: str) -> str:
+        p = _call(data.now_update, table=table, sys_id=sys_id, values=_values(values), confirmed=False)
         lines = [f"  on {table} {sys_id}:"]
         lines += [f"    {c['field']}: {json.dumps(c['current'], default=str)} -> {json.dumps(c['proposed'], default=str)}"
                   for c in p.get("changes", [])] or ["    (no field would change)"]
@@ -114,15 +147,17 @@ def _register_data() -> None:
         return "\n".join(lines)
 
     @register("now_update", group="servicenow", writes=True, preview=_update_preview)
-    def now_update(table: str, sys_id: str, values: dict) -> dict:
+    def now_update(table: str, sys_id: str, values: str) -> dict:
         """Change fields on one record on the live instance. The operator approves it on a card first.
 
         Args:
           table: table name, e.g. incident
           sys_id: the record's 32-character sys_id
-          values: the fields to set, as an object, e.g. {"state": "2", "work_notes": "..."}
+          values: the fields to set, as a JSON object in a string, e.g. {"state": "2", "work_notes": "..."}
         """
-        return _call(data.now_update, table=table, sys_id=sys_id, values=values, confirmed=True)
+        return _call(data.now_update, table=table, sys_id=sys_id, values=_values(values), confirmed=True)
+
+    return aggregate
 
 
 def _register_config() -> None:

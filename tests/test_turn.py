@@ -108,3 +108,17 @@ def test_a_failed_model_call_is_reported_not_raised(instance):
     chat = FakeChat(Reply(ok=False, error="Ollama did not answer"))
     t = turn.run([{"role": "user", "content": "q"}], chat=chat, model_caps=CAPS)
     assert (t.ok, t.text) == (False, "(no reply) Ollama did not answer")
+
+
+def test_an_empty_reply_is_reported_and_left_out_of_history(instance):
+    # What Ollama 0.23.2 returns when it can't parse a tool call qwen3 generated.
+    history = [{"role": "user", "content": "change it"}]
+    t = turn.run(history, chat=FakeChat(Reply(content="")), model_caps=CAPS)
+    assert not t.ok and t.text.startswith("(no reply) the model returned neither text nor a tool call")
+    assert history == [{"role": "user", "content": "change it"}]
+
+
+def test_an_empty_answer_after_a_read_is_reported(instance):
+    chat = FakeChat(Reply(tool_calls=[_call("now_query", table="incident")]), Reply(content="  "))
+    t = turn.run([{"role": "user", "content": "q"}], chat=chat, model_caps=CAPS)
+    assert not t.ok and t.text.startswith("(no reply)") and t.tools_run == ["now_query"]
