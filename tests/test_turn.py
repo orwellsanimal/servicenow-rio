@@ -136,3 +136,69 @@ def test_an_empty_answer_after_only_a_refused_write_says_nothing_ran(instance):
     t = turn.run([{"role": "user", "content": "q"}], chat=chat, model_caps=CAPS)
     assert (t.ok, t.card, t.tools_run) == (False, None, [])
     assert t.text == "(no reply) the model returned no text; nothing ran or was changed. Try asking again."
+
+
+# ── A tool call written out as text (#8) ───────────────────────────────────────
+
+# What qwen3:14b printed on the first live run (RIO_READ_ONLY=1): the second call has no menu, and the
+# model answered with a write and a "card" from a tool that doesn't exist.
+SEEN_ON_8 = ('{"name": "now_update", "arguments": {"sys_id":"0c5f","table":"incident","short_description":"x"}}\n'
+             '{"name": "now_card", "arguments": {"message": "Update incident record", "title": "Update", "type": "confirm"}}')
+
+
+def test_written_out_calls_after_a_read_are_replaced_by_a_note_and_the_turn_is_dropped(instance):
+    chat = FakeChat(Reply(tool_calls=[_call("now_query", table="incident")]), Reply(content=SEEN_ON_8))
+    history = [{"role": "user", "content": "update it"}]
+    t = turn.run(history, chat=chat, model_caps=CAPS)
+    assert not t.ok and t.card is None and instance["written"] == []
+    assert t.text == ("(After reading with now_query, the model wrote out a call to now_update, now_card as text "
+                      "instead of making it. It did not run, and nothing was changed. now_card is not a tool rio "
+                      "offers here. Ask again to have a tool run.)")
+    assert '"name"' not in t.text
+
+
+def test_prose_around_a_written_out_call_is_kept_and_only_the_prose_enters_history(instance):
+    reply = ("INC0010090 is New.\n\n<tool_call>\n{\n  \"name\": \"now_update\",\n  \"arguments\": {\"sys_id\": \"abc\"}\n}\n"
+             "</tool_call>\n\nShall I set it to In Progress?")
+    chat = FakeChat(Reply(tool_calls=[_call("now_query", table="incident")]), Reply(content=reply))
+    history = [{"role": "user", "content": "what about INC0010090?"}]
+    t = turn.run(history, chat=chat, model_caps=CAPS)
+    assert t.ok
+    assert t.text.startswith("INC0010090 is New.\n\nShall I set it to In Progress?\n\n(After reading with now_query")
+    assert history[-1] == {"role": "assistant", "content": "INC0010090 is New.\n\nShall I set it to In Progress?"}
+    assert "now_update" in t.text and "not a tool rio offers" not in t.text   # now_update is on this menu
+
+
+def test_a_written_out_call_in_the_first_reply_is_caught_too(instance):
+    reply = '```json\n{"name": "now_query", "parameters": {"table": "incident"}}\n```'
+    history = [{"role": "user", "content": "q"}]
+    t = turn.run(history, chat=FakeChat(Reply(content=reply)), model_caps=CAPS)
+    assert not t.ok and instance["queried"] == []
+    assert t.text.startswith("(The model wrote out a call to now_query as text instead of making it.")
+    assert history == [{"role": "user", "content": "q"}]
+
+
+@pytest.mark.parametrize("reply", [
+    'The record is {"number": "INC0010090", "state": "New"}.',                       # JSON, but not a call
+    "A tool call looks like this:\n```json\n{\"table\": \"incident\"}\n```",          # a fence, no call
+    "Use the {braces} carefully: { not json",                                        # stray braces
+])
+def test_ordinary_replies_with_braces_or_fences_are_left_alone(instance, reply):
+    history = [{"role": "user", "content": "q"}]
+    t = turn.run(history, chat=FakeChat(Reply(content=reply)), model_caps=CAPS)
+    assert (t.ok, t.text) == (True, reply.strip())
+    assert history[-1] == {"role": "assistant", "content": reply}
+
+
+def test_under_read_only_a_written_out_write_is_explained_as_read_only(instance, monkeypatch):
+    # The live repro of #8: RIO_READ_ONLY hides now_update from the menu, so the model writes it out.
+    from rio import config
+    monkeypatch.setattr(config, "READ_ONLY", True)
+    reply = '{"name": "now_update", "arguments": {"table": "incident", "sys_id": "0c5f", "values": {"short_description": "x"}}}'
+    chat = FakeChat(Reply(tool_calls=[_call("now_query", table="incident")]), Reply(content=reply))
+    t = turn.run([{"role": "user", "content": "change it"}], chat=chat, model_caps=CAPS)
+    assert "now_update" not in {m["function"]["name"] for m in chat.calls[0]["tools"]}
+    assert not t.ok and instance["written"] == []
+    assert t.text == ("(After reading with now_query, the model wrote out a call to now_update as text instead of "
+                      "making it. It did not run, and nothing was changed. rio is read-only here (RIO_READ_ONLY), "
+                      "so now_update isn't offered.)")
