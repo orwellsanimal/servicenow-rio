@@ -6,6 +6,6 @@ python-dotenv==1.2.2
 pysnc==1.2.1
 # servicenow-coder's now-data / now-config verbs as a library (#5). Pure Python: the MCP SDK is
 # only in their [server] extra, which rio does not install. Pinned to a commit.
-now-mcp-config @ git+https://github.com/orwellsanimal/now-mcp@2c8344b#subdirectory=now-config
-now-mcp-data @ git+https://github.com/orwellsanimal/now-mcp@2c8344b#subdirectory=now-data
+now-mcp-config @ git+https://github.com/orwellsanimal/now-mcp@9273a05#subdirectory=now-config
+now-mcp-data @ git+https://github.com/orwellsanimal/now-mcp@9273a05#subdirectory=now-data
 pytest==9.0.2
