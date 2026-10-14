@@ -72,10 +72,15 @@ def load() -> list[str]:
         notes.append(f"now-data tools: off ({problem})")
     else:
         client.configure(config.SN_INSTANCE, *config.sn_credentials())  # now-data normalises it
-        _register_data()
-        notes.append("now-data tools: query, get, aggregate"
-                     + ("" if config.READ_ONLY else ", update (approval card)")
-                     + (" [read-only]" if config.READ_ONLY else ""))
+        unreadable, warning = _check_fields()
+        if unreadable:
+            notes.append(f"now-data tools: off (fields unreadable: {unreadable})")
+        else:
+            _register_data()
+            notes.append("now-data tools: query, get, aggregate"
+                         + ("" if config.READ_ONLY else ", update (approval card)")
+                         + (" [read-only]" if config.READ_ONLY else "")
+                         + (f" [warning: {warning}]" if warning else ""))
 
     if not config.INSTANCE_CONFIG_ROOT:
         notes.append("now-config tools: off (INSTANCE_CONFIG_ROOT not set)")
@@ -89,6 +94,23 @@ def load() -> list[str]:
             _register_config()
             notes.append("now-config tools: field_exists, choice_values")
     return notes
+
+
+def _check_fields() -> tuple[str, str]:
+    """One UI Meta read at startup (#14): every now-data verb checks the table's fields first, and
+    fails closed (FieldsUnreadable) when it can't read them. Returns (unreadable, warning).
+
+    FieldsUnreadable turns the tools off, because every verb would refuse with it; the operator
+    sees why now, not on the first question. Anything else (the wake check giving up on a slow
+    instance) leaves them on with a warning: the first call tries again."""
+    from now_data import client, query_check
+    try:
+        query_check.table_columns(client.get_client(), "incident")
+    except query_check.FieldsUnreadable as e:
+        return str(e), ""
+    except Exception as e:
+        return "", f"could not check field access at startup: {type(e).__name__}: {e}"
+    return "", ""
 
 
 def _register_data() -> None:
