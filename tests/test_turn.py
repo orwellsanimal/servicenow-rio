@@ -124,3 +124,15 @@ def test_an_empty_answer_after_a_read_is_reported(instance):
     assert not t.ok and t.tools_run == ["now_query"]
     assert t.text == ("(no reply) the model returned no text after reading with now_query; "
                       "nothing was changed. Try asking again.")
+
+
+def test_an_empty_answer_after_only_a_refused_write_says_nothing_ran(instance):
+    # The write was refused before a card (no preview possible), so no read ran (#12 review).
+    @register("bad_write", group="sn", writes=True, preview=lambda: (_ for _ in ()).throw(ValueError("no")))
+    def bad_write() -> str:
+        raise AssertionError("must not run")
+
+    chat = FakeChat(Reply(tool_calls=[_call("bad_write")]), Reply(content=""))
+    t = turn.run([{"role": "user", "content": "q"}], chat=chat, model_caps=CAPS)
+    assert (t.ok, t.card, t.tools_run) == (False, None, [])
+    assert t.text == "(no reply) the model returned no text; nothing ran or was changed. Try asking again."

@@ -25,6 +25,9 @@ _EMPTY = ("(no reply) the model returned neither text nor a tool call; Ollama ma
 
 
 def _empty_after(tools: list[str]) -> str:
+    # tools is empty when the round held only writes that park() refused (no card): nothing ran.
+    if not tools:
+        return "(no reply) the model returned no text; nothing ran or was changed. Try asking again."
     return (f"(no reply) the model returned no text after reading with {', '.join(tools)}; "
             "nothing was changed. Try asking again.")
 
