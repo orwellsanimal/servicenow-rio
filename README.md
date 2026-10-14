@@ -35,13 +35,30 @@ rules ([ADR-0002](docs/architecture/0002-local-only-inference-sized-to-the-cpu.m
 
 ## Quick start
 
+**Check the prerequisites first.** Rio needs Python 3.12 (64-bit) and Ollama with a model pulled.
+It doesn't need Git to install or run: pip fetches the now-mcp packages as zip archives from
+GitHub (Git only matters for cloning or contributing). In PowerShell:
+
+```powershell
+py -3.12 --version   # Python 3.12.x. "py is not recognized": Python, or its py launcher, isn't installed
+ollama list          # lists qwen3:14b (or 8b). If not: ollama pull qwen3:14b
 ```
+
+If Python 3.12 is installed without the `py` launcher, use its full path in the first step below
+(for example `& "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe" -m venv venv`).
+
+Then, from the repo folder in PowerShell:
+
+```powershell
 py -3.12 -m venv venv
-venv\Scripts\python -m pip install -r requirements.txt
-copy .env.example .env        # fill in OLLAMA_URL, MODEL and the SN_* pair
-venv\Scripts\python -m rio    # a terminal chat loop that reports tokens per second
-venv\Scripts\python -m pytest tests/ -v
+.\venv\Scripts\python -m pip install -r requirements.txt
+copy .env.example .env               # fill in OLLAMA_URL, MODEL and the SN_* pair; RIO_READ_ONLY=true on a work instance
+.\venv\Scripts\python -m pytest tests/ -q
+.\venv\Scripts\python -m rio         # a terminal chat loop that reports tokens per second
 ```
+
+`The module 'venv' could not be loaded` on any `.\venv\...` line means the first step didn't create
+the venv: PowerShell reads a missing `venv\Scripts\python` as a module name. Fix the first step.
 
 The first run prints the model's capabilities and the decode speed of the first reply. That number
 decides whether `qwen3:14b` or `qwen3:8b` is the working model on this machine.
