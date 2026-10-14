@@ -49,8 +49,8 @@ def configured(monkeypatch):
 
 def test_rio_credentials_reach_the_library_and_the_tools_register(fake_verbs, configured):
     notes = now.load()
-    # rio's SN_IDENTITY pair and URL, not now-data's own env lookup
-    assert ("configure", ("https://dev1.service-now.com", "alice", "pw")) in fake_verbs
+    # rio's SN_IDENTITY pair and SN_INSTANCE as given (now-data normalises it), not now-data's env lookup
+    assert ("configure", ("dev1", "alice", "pw")) in fake_verbs
     assert ("use_snapshot", {"root": "C:/snap"}) in fake_verbs
     assert set(TOOLS) == {"now_query", "now_get", "now_aggregate", "now_update",
                           "now_field_exists", "now_choice_values"}

@@ -46,7 +46,7 @@ def load() -> list[str]:
     if problem:
         notes.append(f"now-data tools: off ({problem})")
     else:
-        client.configure(config.sn_instance_url(), *config.sn_credentials())
+        client.configure(config.SN_INSTANCE, *config.sn_credentials())  # now-data normalises it
         _register_data()
         notes.append("now-data tools: query, get, aggregate"
                      + ("" if config.READ_ONLY else ", update (approval card)")

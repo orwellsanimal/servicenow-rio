@@ -42,12 +42,19 @@ SN_IDENTITY_VARS: dict[str, tuple[str, str]] = {
 
 
 def sn_instance_url() -> str:
-    """The instance as an https URL, from a bare name or a URL; "" when unset."""
+    """The instance URL now-data will use, for display; "" when unset.
+
+    now-data owns the normalising (bare name, host, pasted browser URL -> scheme://host), so rio
+    and the coder repo read SN_INSTANCE the same way. Raises now_data's ConfigError (a
+    RuntimeError) when no host can be read; sn_config_problem() reports that case.
+    """
     if not SN_INSTANCE:
         return ""
-    if SN_INSTANCE.startswith("http"):
-        return SN_INSTANCE.rstrip("/")
-    return f"https://{SN_INSTANCE}.service-now.com"
+    try:
+        from now_data.client import instance_url
+    except ImportError:             # now-* not installed: the tools are off anyway; show it as given
+        return SN_INSTANCE
+    return instance_url(SN_INSTANCE)
 
 
 def sn_credentials() -> tuple[str, str]:
@@ -60,6 +67,10 @@ def sn_config_problem() -> str:
     """Why ServiceNow is not usable, or "" when it is."""
     if not SN_INSTANCE:
         return "SN_INSTANCE is not set (bare name, e.g. dev442835)."
+    try:
+        sn_instance_url()
+    except RuntimeError as e:       # now_data.client.ConfigError
+        return str(e)
     if SN_IDENTITY not in SN_IDENTITY_VARS:
         return f"SN_IDENTITY={SN_IDENTITY!r} is not one of {', '.join(SN_IDENTITY_VARS)}."
     user, pw = sn_credentials()
