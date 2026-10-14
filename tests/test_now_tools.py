@@ -39,6 +39,11 @@ def fake_verbs(monkeypatch):
 
 
 @pytest.fixture
+def with_aggregate(monkeypatch):
+    monkeypatch.setattr(now, "_has_glide_aggregate", lambda: True)
+
+
+@pytest.fixture
 def configured(monkeypatch):
     monkeypatch.setattr(config, "SN_INSTANCE", "dev1")
     monkeypatch.setattr(config, "SN_IDENTITY", "legacy")
@@ -47,7 +52,7 @@ def configured(monkeypatch):
     monkeypatch.setattr(config, "INSTANCE_CONFIG_ROOT", "C:/snap")
 
 
-def test_rio_credentials_reach_the_library_and_the_tools_register(fake_verbs, configured):
+def test_rio_credentials_reach_the_library_and_the_tools_register(fake_verbs, configured, with_aggregate):
     notes = now.load()
     # rio's SN_IDENTITY pair and SN_INSTANCE as given (now-data normalises it), not now-data's env lookup
     assert ("configure", ("dev1", "alice", "pw")) in fake_verbs
@@ -81,7 +86,7 @@ def test_now_update_previews_dry_and_only_the_approved_card_confirms(fake_verbs,
     assert fake_verbs[-1] == ("now_update", {**args, "confirmed": True})
 
 
-def test_a_verb_refusal_reaches_the_model_as_a_tool_error(fake_verbs, configured):
+def test_a_verb_refusal_reaches_the_model_as_a_tool_error(fake_verbs, configured, with_aggregate):
     now.load()
     assert execute_tool("now_aggregate", {"table": "incident"}) == "Tool error (now_aggregate): needs GlideAggregate"
 
@@ -98,3 +103,47 @@ def test_the_menu_describes_each_argument(fake_verbs, configured):
     q = next(s["function"] for s in schemas() if s["function"]["name"] == "now_query")
     assert q["parameters"]["required"] == ["table"]
     assert "encoded query" in q["parameters"]["properties"]["query"]["description"]
+
+
+def test_now_aggregate_is_not_offered_without_glide_aggregate(fake_verbs, configured, monkeypatch):
+    # Released PySNC (1.2.1, rio's pin) has no GlideAggregate; offering the tool only gets an error.
+    monkeypatch.setattr(now, "_has_glide_aggregate", lambda: False)
+    notes = now.load()
+    assert "now_aggregate" not in TOOLS
+    assert any(n.startswith("now-data tools: query, get, update") for n in notes)
+
+
+def test_the_installed_pysnc_decides_aggregate():
+    pysnc = pytest.importorskip("pysnc")
+    assert now._has_glide_aggregate() == hasattr(pysnc.ServiceNowClient, "GlideAggregate")
+
+
+def test_now_update_takes_values_as_a_json_string(fake_verbs, configured):
+    # Ollama 0.23.2 drops a qwen3 tool call holding a nested object, so the menu offers a string.
+    now.load()
+    u = next(s["function"] for s in schemas() if s["function"]["name"] == "now_update")
+    assert u["parameters"]["properties"]["values"]["type"] == "string"
+
+    card = approval.park("now_update", {"table": "incident", "sys_id": "abc", "values": '{"state": "2"}'})
+    assert isinstance(card, approval.Card)
+    assert fake_verbs[-1] == ("now_update", {"table": "incident", "sys_id": "abc",
+                                             "values": {"state": "2"}, "confirmed": False})
+    approval.answer(card, "y")
+    assert fake_verbs[-1][1]["values"] == {"state": "2"} and fake_verbs[-1][1]["confirmed"] is True
+
+
+@pytest.mark.parametrize("bad", ["state=2", "[1, 2]", "", 7])
+def test_now_update_values_that_are_not_an_object_get_no_card(fake_verbs, configured, bad):
+    now.load()
+    out = approval.park("now_update", {"table": "incident", "sys_id": "abc", "values": bad})
+    assert isinstance(out, str) and out.startswith("Tool error (now_update): values must be a JSON object")
+    assert [c for c in fake_verbs if c[0] == "now_update"] == []
+
+
+def test_the_number_vs_sys_id_rule_is_in_the_summary_line(fake_verbs, configured):
+    # The menu shows each tool's first docstring line. With the rule only in the argument
+    # description, qwen3:14b passed INC0008001 to now_get as a sys_id on 5 of 5 seeds; with it in
+    # the summary line, it used now_query number=... on 5 of 5.
+    now.load()
+    d = {s["function"]["name"]: s["function"]["description"] for s in schemas()}
+    assert "NOT for numbers" in d["now_get"] and "number=" in d["now_query"]

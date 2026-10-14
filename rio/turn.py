@@ -16,6 +16,12 @@ from rio.approval import Card, park
 from rio.tools import execute_tool, is_write, schemas
 
 
+# A reply with neither text nor a tool call. Ollama returns this when it can't parse a tool call
+# the model generated, so the turn is dropped (not added to history) and the operator told.
+_EMPTY = ("(no reply) the model returned neither text nor a tool call; Ollama may have failed to "
+          "parse a tool call. Nothing ran. Try rephrasing.")
+
+
 @dataclass
 class Turn:
     text: str = ""                      # what to show the operator
@@ -46,6 +52,8 @@ def run(history: list[dict], *, chat=llm.chat, model_caps: frozenset[str] | None
     turn.replies.append(first)
     if not first.ok:
         return Turn(text=f"(no reply) {first.error}", ok=False, replies=turn.replies)
+    if not first.tool_calls and not first.content.strip():
+        return Turn(text=_EMPTY, ok=False, replies=turn.replies)
     if not first.tool_calls:
         history.append({"role": "assistant", "content": first.content})
         turn.text = first.content.strip()
@@ -80,6 +88,8 @@ def run(history: list[dict], *, chat=llm.chat, model_caps: frozenset[str] | None
     if not second.ok:
         return Turn(text=f"(no reply after tools) {second.error}", ok=False,
                     tools_run=turn.tools_run, replies=turn.replies)
+    if not second.content.strip():
+        return Turn(text=_EMPTY, ok=False, tools_run=turn.tools_run, replies=turn.replies)
     history.append({"role": "assistant", "content": second.content})
     turn.text = second.content.strip()
     return turn
