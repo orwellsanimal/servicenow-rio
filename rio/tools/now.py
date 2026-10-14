@@ -72,9 +72,9 @@ def load() -> list[str]:
         notes.append(f"now-data tools: off ({problem})")
     else:
         client.configure(config.SN_INSTANCE, *config.sn_credentials())  # now-data normalises it
-        unreadable, warning = _check_fields()
-        if unreadable:
-            notes.append(f"now-data tools: off (fields unreadable: {unreadable})")
+        off, warning = _check_fields()
+        if off:
+            notes.append(f"now-data tools: off ({off})")
         else:
             _register_data()
             notes.append("now-data tools: query, get, aggregate"
@@ -98,16 +98,20 @@ def load() -> list[str]:
 
 def _check_fields() -> tuple[str, str]:
     """One UI Meta read at startup (#14): every now-data verb checks the table's fields first, and
-    fails closed (FieldsUnreadable) when it can't read them. Returns (unreadable, warning).
+    fails closed (FieldsUnreadable) when it can't read them. Returns (off, warning).
 
-    FieldsUnreadable turns the tools off, because every verb would refuse with it; the operator
-    sees why now, not on the first question. Anything else (the wake check giving up on a slow
-    instance) leaves them on with a warning: the first call tries again."""
+    Two errors turn the tools off, because every call would fail the same way until the operator
+    fixes something and restarts: FieldsUnreadable, and ConfigError (now-data 0.4.3+ raises it at
+    once for a 401, a host that doesn't resolve, an untrusted certificate). The operator sees why
+    now, not on the first question. Anything else (the wake check giving up on a slow instance)
+    leaves them on with a warning: the first call tries again."""
     from now_data import client, query_check
     try:
         query_check.table_columns(client.get_client(), "incident")
     except query_check.FieldsUnreadable as e:
-        return str(e), ""
+        return f"fields unreadable: {e}", ""
+    except client.ConfigError as e:
+        return f"cannot connect: {e}", ""
     except Exception as e:
         return "", f"could not check field access at startup: {type(e).__name__}: {e}"
     return "", ""

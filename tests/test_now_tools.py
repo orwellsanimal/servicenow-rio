@@ -82,6 +82,15 @@ def test_unreadable_fields_at_startup_turn_the_data_tools_off_and_say_why(fake_v
     assert off and "HTTP 403" in off[0] and "UI Meta" in off[0], notes
 
 
+def test_a_settings_error_at_startup_turns_the_data_tools_off_and_says_why(fake_verbs, configured, monkeypatch):
+    def refused():  # now-data 0.4.3+: a 401 fails at once instead of waiting 120 s
+        raise now_data_client.ConfigError("https://dev1.service-now.com refused user 'alice' (HTTP 401): …")
+    monkeypatch.setattr(now_data_client, "get_client", refused)
+    notes = now.load()
+    assert not {"now_query", "now_get", "now_aggregate", "now_update"} & set(TOOLS)
+    assert any(n.startswith("now-data tools: off (cannot connect: ") and "HTTP 401" in n for n in notes), notes
+
+
 def test_any_other_startup_failure_keeps_the_tools_on_with_a_warning(fake_verbs, configured, monkeypatch):
     def slow_wake():
         raise RuntimeError("Instance at https://dev1.service-now.com did not respond with JSON within 120s.")
