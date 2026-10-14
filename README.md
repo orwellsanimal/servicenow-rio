@@ -35,12 +35,12 @@ rules ([ADR-0002](docs/architecture/0002-local-only-inference-sized-to-the-cpu.m
 
 ## Quick start
 
-**Check the prerequisites first.** Rio needs Python 3.12 (64-bit), Git (pip installs the now-mcp
-packages from GitHub) and Ollama with a model pulled. In PowerShell:
+**Check the prerequisites first.** Rio needs Python 3.12 (64-bit) and Ollama with a model pulled.
+It doesn't need Git to install or run: pip fetches the now-mcp packages as zip archives from
+GitHub (Git only matters for cloning or contributing). In PowerShell:
 
 ```powershell
 py -3.12 --version   # Python 3.12.x. "py is not recognized": Python, or its py launcher, isn't installed
-git --version        # "git is not recognized": install Git for Windows
 ollama list          # lists qwen3:14b (or 8b). If not: ollama pull qwen3:14b
 ```
 
