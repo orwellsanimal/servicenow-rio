@@ -132,11 +132,11 @@ def test_now_update_takes_values_as_a_json_string(fake_verbs, configured):
     assert fake_verbs[-1][1]["values"] == {"state": "2"} and fake_verbs[-1][1]["confirmed"] is True
 
 
-@pytest.mark.parametrize("bad", ["state=2", "[1, 2]", "", 7])
+@pytest.mark.parametrize("bad", ["state=2", "[1, 2]", "", 7, "{}", {}])
 def test_now_update_values_that_are_not_an_object_get_no_card(fake_verbs, configured, bad):
     now.load()
     out = approval.park("now_update", {"table": "incident", "sys_id": "abc", "values": bad})
-    assert isinstance(out, str) and out.startswith("Tool error (now_update): values must be a JSON object")
+    assert isinstance(out, str) and out.startswith("Tool error (now_update): values ")
     assert [c for c in fake_verbs if c[0] == "now_update"] == []
 
 
@@ -147,3 +147,19 @@ def test_the_number_vs_sys_id_rule_is_in_the_summary_line(fake_verbs, configured
     now.load()
     d = {s["function"]["name"]: s["function"]["description"] for s in schemas()}
     assert "NOT for numbers" in d["now_get"] and "number=" in d["now_query"]
+
+
+def test_a_capped_query_says_its_count_is_not_the_total(fake_verbs, configured, monkeypatch):
+    # now-data's count is len(rows) after the limit; "how many" must not be answered from it (#9 review).
+    monkeypatch.setattr(now_data_verbs, "now_query",
+                        lambda **kw: {"count": 10, "truncated": True, "records": [{}] * 10})
+    now.load()
+    out = execute_tool("now_query", {"table": "incident", "query": "active=true"})
+    assert '"total": "unknown: more than 10' in out
+    d = next(s["function"]["description"] for s in schemas() if s["function"]["name"] == "now_query")
+    assert "not a total" in d
+
+
+def test_an_uncapped_query_has_no_total_note(fake_verbs, configured):
+    now.load()
+    assert "total" not in execute_tool("now_query", {"table": "incident"})
