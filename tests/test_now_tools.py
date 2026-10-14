@@ -39,11 +39,6 @@ def fake_verbs(monkeypatch):
 
 
 @pytest.fixture
-def with_aggregate(monkeypatch):
-    monkeypatch.setattr(now, "_has_glide_aggregate", lambda: True)
-
-
-@pytest.fixture
 def configured(monkeypatch):
     monkeypatch.setattr(config, "SN_INSTANCE", "dev1")
     monkeypatch.setattr(config, "SN_IDENTITY", "legacy")
@@ -52,7 +47,7 @@ def configured(monkeypatch):
     monkeypatch.setattr(config, "INSTANCE_CONFIG_ROOT", "C:/snap")
 
 
-def test_rio_credentials_reach_the_library_and_the_tools_register(fake_verbs, configured, with_aggregate):
+def test_rio_credentials_reach_the_library_and_the_tools_register(fake_verbs, configured):
     notes = now.load()
     # rio's SN_IDENTITY pair and SN_INSTANCE as given (now-data normalises it), not now-data's env lookup
     assert ("configure", ("dev1", "alice", "pw")) in fake_verbs
@@ -86,7 +81,7 @@ def test_now_update_previews_dry_and_only_the_approved_card_confirms(fake_verbs,
     assert fake_verbs[-1] == ("now_update", {**args, "confirmed": True})
 
 
-def test_a_verb_refusal_reaches_the_model_as_a_tool_error(fake_verbs, configured, with_aggregate):
+def test_a_verb_refusal_reaches_the_model_as_a_tool_error(fake_verbs, configured):
     now.load()
     assert execute_tool("now_aggregate", {"table": "incident"}) == "Tool error (now_aggregate): needs GlideAggregate"
 
@@ -105,21 +100,36 @@ def test_the_menu_describes_each_argument(fake_verbs, configured):
     assert "encoded query" in q["parameters"]["properties"]["query"]["description"]
 
 
-def test_now_aggregate_is_not_offered_without_glide_aggregate(fake_verbs, configured, monkeypatch):
-    # Released PySNC (1.2.1, rio's pin) has no GlideAggregate; offering the tool only gets an error.
-    monkeypatch.setattr(now, "_has_glide_aggregate", lambda: False)
+def test_now_aggregate_is_offered_on_released_pysnc(fake_verbs, configured):
+    # now-data 0.3.0+ counts through the Stats API itself, without GlideAggregate (now-mcp#5).
     notes = now.load()
-    assert "now_aggregate" not in TOOLS
-    assert any(n.startswith("now-data tools: query, get, update") for n in notes)
+    assert "now_aggregate" in TOOLS
+    assert any(n.startswith("now-data tools: query, get, aggregate") for n in notes)
 
 
-def test_the_installed_pysnc_decides_aggregate():
-    pysnc = pytest.importorskip("pysnc")
-    assert now._has_glide_aggregate() == hasattr(pysnc.ServiceNowClient, "GlideAggregate")
+def test_a_query_refusal_reaches_the_model_with_its_fix(fake_verbs, configured, monkeypatch):
+    # now-data 0.4.0 refuses what ServiceNow would silently drop (now-mcp#4); the fix must reach the model.
+    from now_data.query_check import QueryRefused
+    refused = QueryRefused("this request would give a wrong or unchecked result, so nothing was run: "
+                           "state stores '1' for 'new': use state=1.")
+    monkeypatch.setattr(now_data_verbs, "now_aggregate", lambda **kw: (_ for _ in ()).throw(refused))
+    now.load()
+    out = execute_tool("now_aggregate", {"table": "incident", "query": "state=new"})
+    assert out.startswith("Tool error (now_aggregate): this request would give a wrong")
+    assert "use state=1" in out
+
+
+def test_unreadable_fields_reach_the_model_as_a_tool_error_not_a_crash(fake_verbs, configured, monkeypatch):
+    from now_data.query_check import FieldsUnreadable
+    err = FieldsUnreadable("could not read the fields of 'incident' to check the request (HTTP 403 ...); nothing was run.")
+    monkeypatch.setattr(now_data_verbs, "now_query", lambda **kw: (_ for _ in ()).throw(err))
+    now.load()
+    out = execute_tool("now_query", {"table": "incident"})
+    assert out.startswith("Tool error (now_query): could not read the fields") and "unexpected" not in out
 
 
 def test_now_update_takes_values_as_a_json_string(fake_verbs, configured):
-    # Ollama 0.23.2 drops a qwen3 tool call holding a nested object, so the menu offers a string.
+    # qwen3 closes a nested object with "))" after a value holding "(", which Ollama drops (#11); the menu offers a string.
     now.load()
     u = next(s["function"] for s in schemas() if s["function"]["name"] == "now_update")
     assert u["parameters"]["properties"]["values"]["type"] == "string"
@@ -155,9 +165,9 @@ def test_a_capped_query_says_its_count_is_not_the_total(fake_verbs, configured, 
                         lambda **kw: {"count": 10, "truncated": True, "records": [{}] * 10})
     now.load()
     out = execute_tool("now_query", {"table": "incident", "query": "active=true"})
-    assert '"total": "unknown: more than 10' in out
+    assert '"total": "unknown: more than 10' in out and "use now_aggregate" in out
     d = next(s["function"]["description"] for s in schemas() if s["function"]["name"] == "now_query")
-    assert "not a total" in d
+    assert 'Not for "how many": use now_aggregate' in d
 
 
 def test_an_uncapped_query_has_no_total_note(fake_verbs, configured):
