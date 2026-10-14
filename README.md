@@ -48,9 +48,13 @@ decides whether `qwen3:14b` or `qwen3:8b` is the working model on this machine.
 
 ## Status
 
-Bootstrap. The client and the chat loop are real; the ServiceNow tools arrive with the issues in
-the tracker, in this order: the tools and graphs with their tests, the approval card and operator
-commands, the `now-data` / `now-config` seam, then the Fluent SDK pipeline from servicenow-coder.
+- **Ollama client and chat loop:** capability-aware, local only, with the decode rate on every reply.
+- **Tools:** servicenow-coder's verbs via [now-mcp](https://github.com/orwellsanimal/now-mcp), imported as a library:
+  - from the live instance: `now_query`, `now_get`, `now_aggregate`;
+  - from the instance-config snapshot: `now_field_exists`, `now_choice_values`;
+  - one write: `now_update`.
+- **Writes:** a write waits on an approval card that shows its real dry-run diff, and only `y` runs it ([ADR-0003](docs/architecture/0003-a-write-runs-only-from-an-approved-card.md)). With `RIO_READ_ONLY=true` there are no writes at all.
+- **Next:** the triage / enrich / resolve graphs and the status card (#1), then the operator commands, then the Fluent SDK pipeline.
 
 ## Conventions
 

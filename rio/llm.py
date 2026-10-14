@@ -6,6 +6,7 @@
 #   * `think` only to a model that lists the `thinking` capability (Ollama answers 400 otherwise);
 #   * `tools` only to a model that lists `tools`, refused with a reason when it does not;
 #   * `num_ctx` always sent, `num_thread` never (whitcortex #1992);
+#   * `num_predict` always sent, so a looping model cannot hold the runner until the timeout;
 #   * the decode rate from Ollama's own eval_count / eval_duration on every reply, so the laptop's
 #     speed is measured, not assumed.
 
@@ -72,7 +73,7 @@ def chat(messages: list[dict], *, model: str | None = None, tools: list[dict] | 
         return Reply(ok=False, model=model,
                      error=f"{model} does not list the 'tools' capability; a turn with tools cannot run on it.")
     body: dict = {"model": model, "messages": messages, "stream": False,
-                  "options": {"num_ctx": num_ctx or config.NUM_CTX}}
+                  "options": {"num_ctx": num_ctx or config.NUM_CTX, "num_predict": config.NUM_PREDICT}}
     if tools:
         body["tools"] = tools
     if format:

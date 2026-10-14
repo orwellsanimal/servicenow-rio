@@ -18,6 +18,17 @@ OLLAMA_URL: str = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
 MODEL: str = os.getenv("MODEL", "qwen3:14b")
 NUM_CTX: int = int(os.getenv("NUM_CTX", "8192"))          # ADR-0002: a CPU laptop, not the lab's 16k
 LLM_TIMEOUT: int = int(os.getenv("LLM_TIMEOUT", "300"))   # CPU decode is slow; the first call also loads
+# A ceiling on tokens generated per call. A model that loops on a tool call would otherwise generate
+# until LLM_TIMEOUT, and Ollama keeps the runner busy on an abandoned request after rio gives up.
+NUM_PREDICT: int = int(os.getenv("NUM_PREDICT", "1024"))
+
+# On an instance rio must not change (the corporate one), no write tool is offered or dispatched,
+# approved or not (ADR-0003).
+READ_ONLY: bool = os.getenv("RIO_READ_ONLY", "").strip().lower() in ("1", "true", "yes")
+
+# The instance-config snapshot now-config reads (servicenow-coder's layout); it must be a snapshot
+# of THIS instance. Unset: the now-config tools are not offered.
+INSTANCE_CONFIG_ROOT: str = os.getenv("INSTANCE_CONFIG_ROOT", "").strip()
 
 # ── ServiceNow identity ──────────────────────────────────────────────────────
 SN_INSTANCE: str = os.getenv("SN_INSTANCE", "").strip()
