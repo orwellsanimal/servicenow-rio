@@ -20,11 +20,26 @@ def test_unset_means_not_configured(env):
     assert config.sn_instance_url() == ""
 
 
-def test_a_bare_name_becomes_the_instance_url(env):
-    env.setattr(config, "SN_INSTANCE", "dev442835")
+@pytest.mark.parametrize(
+    "given",
+    [
+        "dev442835",
+        "dev442835.service-now.com",            # was ...service-now.com.service-now.com (#7 review)
+        "https://dev442835.service-now.com/",
+        "https://dev442835.service-now.com/now/nav/ui/classic",
+        "HTTPS://dev442835.service-now.com",
+    ],
+)
+def test_every_form_of_the_instance_becomes_the_instance_url(env, given):
+    env.setattr(config, "SN_INSTANCE", given)
     assert config.sn_instance_url() == "https://dev442835.service-now.com"
-    env.setattr(config, "SN_INSTANCE", "https://dev442835.service-now.com/")
-    assert config.sn_instance_url() == "https://dev442835.service-now.com"
+
+
+def test_an_unreadable_instance_is_a_config_problem(env):
+    env.setattr(config, "SN_INSTANCE", "https://")
+    env.setenv("SN_HUMAN_USER", "jody")
+    env.setenv("SN_HUMAN_PASSWORD", "x")
+    assert "Can't read an instance host" in config.sn_config_problem()
 
 
 def test_the_identity_pair_must_both_be_set(env):

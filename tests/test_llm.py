@@ -79,10 +79,10 @@ def test_tools_are_refused_with_a_reason_when_the_model_has_none(ollama):
     assert _chat_bodies(ollama) == []          # nothing was sent
 
 
-def test_num_ctx_is_sent_and_num_thread_never(ollama):
+def test_num_ctx_and_num_predict_are_sent_and_num_thread_never(ollama):
     llm.chat([{"role": "user", "content": "hi"}])
     options = _chat_bodies(ollama)[-1]["options"]
-    assert options == {"num_ctx": config.NUM_CTX}
+    assert options == {"num_ctx": config.NUM_CTX, "num_predict": config.NUM_PREDICT}
 
 
 def test_a_missing_model_is_named_with_the_pull_command(ollama):
