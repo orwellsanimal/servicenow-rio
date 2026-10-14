@@ -7,6 +7,9 @@
 #   * docstrings with an Args: block, so each argument carries a description on the menu;
 #   * the write gate: now_update is a write (ADR-0003). Its preview is the library's own dry run
 #     (confirmed=False); only the approved card calls it with confirmed=True.
+# now-data (0.4.0+) checks every request against the table's fields and choice lists first and
+# refuses what ServiceNow would silently drop (state=new, an unknown field): the refusal is a
+# ValueError carrying the fix ("use state=1"), which _call hands the model as a tool error.
 # now_run_script is deliberately not offered: arbitrary server-side JavaScript is not something a
 # chat model should propose on a work instance.
 
@@ -54,15 +57,6 @@ def _values(values: Any) -> dict:
     raise ToolError(f"values must be a JSON object of field: value pairs, got {type(values).__name__}.")
 
 
-def _has_glide_aggregate() -> bool:
-    """now_aggregate needs GlideAggregate, which released PySNC lacks (ServiceNow/PySNC#146)."""
-    try:
-        from pysnc import ServiceNowClient
-    except ImportError:
-        return False
-    return hasattr(ServiceNowClient, "GlideAggregate")
-
-
 def load() -> list[str]:
     """Register the tools whose prerequisites are present. Returns one line per group for the banner."""
     notes = []
@@ -77,8 +71,8 @@ def load() -> list[str]:
         notes.append(f"now-data tools: off ({problem})")
     else:
         client.configure(config.SN_INSTANCE, *config.sn_credentials())  # now-data normalises it
-        aggregate = _register_data()
-        notes.append("now-data tools: query, get" + (", aggregate" if aggregate else "")
+        _register_data()
+        notes.append("now-data tools: query, get, aggregate"
                      + ("" if config.READ_ONLY else ", update (approval card)")
                      + (" [read-only]" if config.READ_ONLY else ""))
 
@@ -96,16 +90,15 @@ def load() -> list[str]:
     return notes
 
 
-def _register_data() -> bool:
-    """Register the now-data tools. Returns whether now_aggregate was registered."""
+def _register_data() -> None:
     from now_data import verbs as data
 
     @register("now_query", group="servicenow", writes=False)
     def now_query(table: str, query: str = "", fields: str = "", limit: int = 10) -> dict:
-        """Find records by encoded query (by number: query number=INC0010001). count = rows returned, capped by limit; not a total.
+        """Find records by encoded query (by number: query number=INC0010001). Not for "how many": use now_aggregate.
 
-        Returns {count, truncated, records} from the live instance; when truncated, there are more
-        rows than count and the total is unknown (a "total" note says so).
+        Returns {count, truncated, records} from the live instance. count is the rows returned,
+        capped by limit; when truncated there are more, and a "total" note says to count instead.
 
         Args:
           table: table name, e.g. incident, change_request, sys_user
@@ -117,7 +110,8 @@ def _register_data() -> bool:
                     display_value=True)
         if isinstance(out, dict) and out.get("truncated"):
             # count is len(rows) after the cap; a model reads it as the total (#9 review)
-            out = {**out, "total": f"unknown: more than {out.get('count')} (only the first {out.get('count')} were returned)"}
+            out = {**out, "total": f"unknown: more than {out.get('count')} (only the first {out.get('count')} "
+                                   "were returned); use now_aggregate for the number"}
         return out
 
     @register("now_get", group="servicenow", writes=False)
@@ -131,19 +125,16 @@ def _register_data() -> bool:
         """
         return _call(data.now_get, table=table, sys_id=sys_id, fields=fields, display_value=True)
 
-    # Offered only when it can work: released PySNC lacks GlideAggregate, and the model can't fix that.
-    aggregate = _has_glide_aggregate()
-    if aggregate:
-        @register("now_aggregate", group="servicenow", writes=False)
-        def now_aggregate(table: str, query: str = "", group_by: str = "") -> dict:
-            """Count records on the live instance, optionally grouped by a field.
+    @register("now_aggregate", group="servicenow", writes=False)
+    def now_aggregate(table: str, query: str = "", group_by: str = "") -> dict:
+        """How many records match an encoded query: the real total, optionally grouped by a field.
 
-            Args:
-              table: table name, e.g. incident
-              query: encoded query to filter first, e.g. active=true
-              group_by: field to group the counts by, e.g. priority or assignment_group
-            """
-            return _call(data.now_aggregate, table=table, query=query, group_by=group_by, count=True)
+        Args:
+          table: table name, e.g. incident
+          query: encoded query to filter first, e.g. active=true
+          group_by: field to group the counts by, e.g. priority or assignment_group
+        """
+        return _call(data.now_aggregate, table=table, query=query, group_by=group_by, count=True)
 
     def _update_preview(table: str, sys_id: str, values: str) -> str:
         p = _call(data.now_update, table=table, sys_id=sys_id, values=_values(values), confirmed=False)
@@ -165,7 +156,6 @@ def _register_data() -> bool:
         """
         return _call(data.now_update, table=table, sys_id=sys_id, values=_values(values), confirmed=True)
 
-    return aggregate
 
 
 def _register_config() -> None:
