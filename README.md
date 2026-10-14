@@ -44,8 +44,12 @@ py -3.12 --version   # Python 3.12.x. "py is not recognized": Python, or its py 
 ollama list          # lists qwen3:14b (or 8b). If not: ollama pull qwen3:14b
 ```
 
-If Python 3.12 is installed without the `py` launcher, use its full path in the first step below
-(for example `& "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe" -m venv venv`).
+If Python 3.12 is installed without the `py` launcher, use its full path in the first step below:
+`& "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe" -m venv venv` for a per-user install,
+or `& "C:\Program Files\Python312\python.exe" -m venv venv` for an all-users one.
+
+Behind a proxy with an allowlist, the install needs `pypi.org`, `files.pythonhosted.org`,
+`github.com` and `codeload.github.com` (GitHub redirects the archive download there).
 
 Then, from the repo folder in PowerShell:
 
