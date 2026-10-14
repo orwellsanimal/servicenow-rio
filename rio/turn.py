@@ -16,10 +16,17 @@ from rio.approval import Card, park
 from rio.tools import execute_tool, is_write, schemas
 
 
-# A reply with neither text nor a tool call. Ollama returns this when it can't parse a tool call
-# the model generated, so the turn is dropped (not added to history) and the operator told.
+# A reply with neither text nor a tool call. On the first call Ollama returns this when it can't
+# parse a tool call the model generated; the turn is dropped (not added to history) and the operator
+# told. After a read round the reads did run (a write would have parked on a card first), so the
+# second message says what ran and that nothing was changed.
 _EMPTY = ("(no reply) the model returned neither text nor a tool call; Ollama may have failed to "
           "parse a tool call. Nothing ran. Try rephrasing.")
+
+
+def _empty_after(tools: list[str]) -> str:
+    return (f"(no reply) the model returned no text after reading with {', '.join(tools)}; "
+            "nothing was changed. Try asking again.")
 
 
 @dataclass
@@ -89,7 +96,7 @@ def run(history: list[dict], *, chat=llm.chat, model_caps: frozenset[str] | None
         return Turn(text=f"(no reply after tools) {second.error}", ok=False,
                     tools_run=turn.tools_run, replies=turn.replies)
     if not second.content.strip():
-        return Turn(text=_EMPTY, ok=False, tools_run=turn.tools_run, replies=turn.replies)
+        return Turn(text=_empty_after(turn.tools_run), ok=False, tools_run=turn.tools_run, replies=turn.replies)
     history.append({"role": "assistant", "content": second.content})
     turn.text = second.content.strip()
     return turn

@@ -39,15 +39,18 @@ def _values(values: Any) -> dict:
     Ollama 0.23.2 drops a qwen3 tool call whose arguments hold a nested object: the model generates
     it, and /api/chat returns no content and no tool_calls. A string argument parses. A dict is
     still accepted, for a model or Ollama that gets nested objects right."""
-    if isinstance(values, dict):
-        return values
     if isinstance(values, str):
         try:
             parsed = json.loads(values)
         except json.JSONDecodeError as e:
             raise ToolError(f"values must be a JSON object, e.g. {{\"state\": \"2\"}}; could not parse it: {e}") from e
-        if isinstance(parsed, dict):
-            return parsed
+        if not isinstance(parsed, dict):
+            raise ToolError(f"values must be a JSON object of field: value pairs, got a JSON {type(parsed).__name__}.")
+        values = parsed
+    if isinstance(values, dict):
+        if not values:
+            raise ToolError("values is empty: name at least one field to set, e.g. {\"state\": \"2\"}.")
+        return values
     raise ToolError(f"values must be a JSON object of field: value pairs, got {type(values).__name__}.")
 
 
@@ -99,9 +102,10 @@ def _register_data() -> bool:
 
     @register("now_query", group="servicenow", writes=False)
     def now_query(table: str, query: str = "", fields: str = "", limit: int = 10) -> dict:
-        """Find records with an encoded query; also how to look a record up by its number (query number=INC0010001).
+        """Find records by encoded query (by number: query number=INC0010001). count = rows returned, capped by limit; not a total.
 
-        Returns {count, truncated, records} from the live instance.
+        Returns {count, truncated, records} from the live instance; when truncated, there are more
+        rows than count and the total is unknown (a "total" note says so).
 
         Args:
           table: table name, e.g. incident, change_request, sys_user
@@ -109,8 +113,12 @@ def _register_data() -> bool:
           fields: comma-separated fields to return, e.g. number,short_description,state; keep it short
           limit: maximum rows, default 10
         """
-        return _call(data.now_query, table=table, query=query, fields=fields, limit=limit,
-                     display_value=True)
+        out = _call(data.now_query, table=table, query=query, fields=fields, limit=limit,
+                    display_value=True)
+        if isinstance(out, dict) and out.get("truncated"):
+            # count is len(rows) after the cap; a model reads it as the total (#9 review)
+            out = {**out, "total": f"unknown: more than {out.get('count')} (only the first {out.get('count')} were returned)"}
+        return out
 
     @register("now_get", group="servicenow", writes=False)
     def now_get(table: str, sys_id: str, fields: str = "") -> dict:
