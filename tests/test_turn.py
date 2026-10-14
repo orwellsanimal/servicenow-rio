@@ -242,3 +242,15 @@ def test_a_model_without_tools_is_told_why_no_tool_is_offered(instance):
 def test_shapes_left_alone_on_purpose(instance, reply):
     t = turn.run([{"role": "user", "content": "q"}], chat=FakeChat(Reply(content=reply)), model_caps=CAPS)
     assert (t.ok, t.text) == (True, reply)
+
+
+@pytest.mark.parametrize("reply", [
+    '{"name": "now_update", "arguments": {"sys_id": "a"}}\n</tool_call>',   # seen live: a close it never opened
+    '<tool_call>\n{"name": "now_update", "arguments": {"sys_id": "a"}}',    # and the mirror image
+    '```json\n<tool_call>\n{"name": "now_update", "arguments": {}}\n</tool_call>\n```',
+])
+def test_a_lone_tool_call_tag_beside_a_call_goes_with_it(instance, reply):
+    history = [{"role": "user", "content": "q"}]
+    t = turn.run(history, chat=FakeChat(Reply(content=reply)), model_caps=CAPS)
+    assert not t.ok and "tool_call>" not in t.text and "```" not in t.text, t.text
+    assert history == [{"role": "user", "content": "q"}]
