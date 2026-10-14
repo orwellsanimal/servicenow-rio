@@ -121,4 +121,6 @@ def test_an_empty_reply_is_reported_and_left_out_of_history(instance):
 def test_an_empty_answer_after_a_read_is_reported(instance):
     chat = FakeChat(Reply(tool_calls=[_call("now_query", table="incident")]), Reply(content="  "))
     t = turn.run([{"role": "user", "content": "q"}], chat=chat, model_caps=CAPS)
-    assert not t.ok and t.text.startswith("(no reply)") and t.tools_run == ["now_query"]
+    assert not t.ok and t.tools_run == ["now_query"]
+    assert t.text == ("(no reply) the model returned no text after reading with now_query; "
+                      "nothing was changed. Try asking again.")
