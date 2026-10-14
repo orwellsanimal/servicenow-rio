@@ -11,6 +11,7 @@ from rio.tools import TOOLS, execute_tool, now, schemas
 
 now_data_verbs = pytest.importorskip("now_data.verbs")
 now_data_client = pytest.importorskip("now_data.client")
+now_data_query_check = pytest.importorskip("now_data.query_check")
 now_config_verbs = pytest.importorskip("now_config.verbs")
 
 
@@ -32,6 +33,10 @@ def fake_verbs(monkeypatch):
         "no_ops": [], "unknown_fields": ["bogus"]}))
     monkeypatch.setattr(now_data_verbs, "now_aggregate", rec("now_aggregate", NotImplementedError("needs GlideAggregate")))
     monkeypatch.setattr(now_data_client, "configure", lambda *a: calls.append(("configure", a)))
+    # The startup field check (#14): no socket, and it reads only after configure().
+    monkeypatch.setattr(now_data_client, "get_client", lambda: calls.append(("get_client",)) or "client")
+    monkeypatch.setattr(now_data_query_check, "table_columns",
+                        lambda c, table: calls.append(("table_columns", c, table)) or {"number": {}})
     monkeypatch.setattr(now_config_verbs, "use_snapshot", rec("use_snapshot", None))
     monkeypatch.setattr(now_config_verbs, "now_role_exists", rec("now_role_exists", {"exists": True}))
     monkeypatch.setattr(now_config_verbs, "now_field_exists", rec("now_field_exists", {"exists": True, "inherited_from": "task"}))
@@ -55,6 +60,45 @@ def test_rio_credentials_reach_the_library_and_the_tools_register(fake_verbs, co
     assert set(TOOLS) == {"now_query", "now_get", "now_aggregate", "now_update",
                           "now_field_exists", "now_choice_values"}
     assert any(n.startswith("now-data tools: query") for n in notes)
+
+
+def test_the_startup_field_check_reads_incident_once_after_configure(fake_verbs, configured):
+    now.load()
+    data_calls = [c[0] for c in fake_verbs if c[0] in ("configure", "get_client", "table_columns")]
+    assert data_calls == ["configure", "get_client", "table_columns"]
+    assert ("table_columns", "client", "incident") in fake_verbs
+
+
+def test_unreadable_fields_at_startup_turn_the_data_tools_off_and_say_why(fake_verbs, configured, monkeypatch):
+    def refuse(c, table):
+        raise now_data_query_check.FieldsUnreadable(
+            "could not read the fields of 'incident' to check the request (HTTP 403 from …: the ServiceNow "
+            "user needs read access to the UI Meta API); nothing was run.")
+    monkeypatch.setattr(now_data_query_check, "table_columns", refuse)
+    notes = now.load()
+    assert not {"now_query", "now_get", "now_aggregate", "now_update"} & set(TOOLS)
+    assert {"now_field_exists", "now_choice_values"} <= set(TOOLS)  # now-config doesn't read the instance
+    off = [n for n in notes if n.startswith("now-data tools: off (fields unreadable:")]
+    assert off and "HTTP 403" in off[0] and "UI Meta" in off[0], notes
+
+
+def test_a_settings_error_at_startup_turns_the_data_tools_off_and_says_why(fake_verbs, configured, monkeypatch):
+    def refused():  # now-data 0.4.3+: a 401 fails at once instead of waiting 120 s
+        raise now_data_client.ConfigError("https://dev1.service-now.com refused user 'alice' (HTTP 401): …")
+    monkeypatch.setattr(now_data_client, "get_client", refused)
+    notes = now.load()
+    assert not {"now_query", "now_get", "now_aggregate", "now_update"} & set(TOOLS)
+    assert any(n.startswith("now-data tools: off (cannot connect: ") and "HTTP 401" in n for n in notes), notes
+
+
+def test_any_other_startup_failure_keeps_the_tools_on_with_a_warning(fake_verbs, configured, monkeypatch):
+    def slow_wake():
+        raise RuntimeError("Instance at https://dev1.service-now.com did not respond with JSON within 120s.")
+    monkeypatch.setattr(now_data_client, "get_client", slow_wake)
+    notes = now.load()
+    assert {"now_query", "now_get", "now_aggregate", "now_update"} <= set(TOOLS)
+    line = next(n for n in notes if n.startswith("now-data tools: query"))
+    assert "[warning: could not check field access at startup: RuntimeError: Instance at" in line, line
 
 
 def test_without_credentials_or_snapshot_nothing_is_offered(fake_verbs, monkeypatch):

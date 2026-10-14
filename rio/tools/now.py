@@ -72,10 +72,15 @@ def load() -> list[str]:
         notes.append(f"now-data tools: off ({problem})")
     else:
         client.configure(config.SN_INSTANCE, *config.sn_credentials())  # now-data normalises it
-        _register_data()
-        notes.append("now-data tools: query, get, aggregate"
-                     + ("" if config.READ_ONLY else ", update (approval card)")
-                     + (" [read-only]" if config.READ_ONLY else ""))
+        off, warning = _check_fields()
+        if off:
+            notes.append(f"now-data tools: off ({off})")
+        else:
+            _register_data()
+            notes.append("now-data tools: query, get, aggregate"
+                         + ("" if config.READ_ONLY else ", update (approval card)")
+                         + (" [read-only]" if config.READ_ONLY else "")
+                         + (f" [warning: {warning}]" if warning else ""))
 
     if not config.INSTANCE_CONFIG_ROOT:
         notes.append("now-config tools: off (INSTANCE_CONFIG_ROOT not set)")
@@ -89,6 +94,27 @@ def load() -> list[str]:
             _register_config()
             notes.append("now-config tools: field_exists, choice_values")
     return notes
+
+
+def _check_fields() -> tuple[str, str]:
+    """One UI Meta read at startup (#14): every now-data verb checks the table's fields first, and
+    fails closed (FieldsUnreadable) when it can't read them. Returns (off, warning).
+
+    Two errors turn the tools off, because every call would fail the same way until the operator
+    fixes something and restarts: FieldsUnreadable, and ConfigError (now-data 0.4.3+ raises it at
+    once for a 401, a host that doesn't resolve, an untrusted certificate). The operator sees why
+    now, not on the first question. Anything else (the wake check giving up on a slow instance)
+    leaves them on with a warning: the first call tries again."""
+    from now_data import client, query_check
+    try:
+        query_check.table_columns(client.get_client(), "incident")
+    except query_check.FieldsUnreadable as e:
+        return f"fields unreadable: {e}", ""
+    except client.ConfigError as e:
+        return f"cannot connect: {e}", ""
+    except Exception as e:
+        return "", f"could not check field access at startup: {type(e).__name__}: {e}"
+    return "", ""
 
 
 def _register_data() -> None:
