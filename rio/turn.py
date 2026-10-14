@@ -32,8 +32,10 @@ _EMPTY = ("(no reply) the model returned neither text nor a tool call; Ollama ma
 # doesn't exist ("now_card"). It never runs; rio cuts it out and says so. Not caught, on purpose
 # until it is seen under rio's native tools: whitcortex's text protocol, {"tool": …, "args": …}.
 _START = re.compile(r"[{\[]")
-_OPENS = re.compile(r"(```(?:json)?|<tool_call>)\s*$")            # a wrapper ending right before a call
-_CLOSES = {"```": re.compile(r"\s*```"), "<tool_call>": re.compile(r"\s*</tool_call>")}
+# A fence is ordinary markdown, so it goes only as a pair around one call. A <tool_call> tag only
+# ever wraps a call, so either half goes on its own: qwen3 has been seen closing one it never opened.
+_FENCE_OPEN, _FENCE_CLOSE = re.compile(r"```(?:json)?\s*$"), re.compile(r"\s*```")
+_TAG_OPEN, _TAG_CLOSE = re.compile(r"<tool_call>\s*$"), re.compile(r"\s*</tool_call>")
 _DECODER = json.JSONDecoder()
 
 
@@ -55,8 +57,9 @@ def _call_names(obj) -> list[str]:
 def _written_calls(text: str) -> tuple[list[str], str]:
     """(the tool names written out as calls, the text with those calls removed).
 
-    Only each call's own span goes, with a fence or tag that directly encloses it: other code blocks
-    keep their fences. Text without a written-out call comes back unchanged."""
+    Only each call's own span goes, with the <tool_call> tags beside it and a fence that directly
+    encloses it: other code blocks keep their fences. Text without a written-out call comes back
+    unchanged."""
     names, kept, cut, pos = [], [], 0, 0
     while m := _START.search(text, pos):
         start = m.start()
@@ -68,11 +71,12 @@ def _written_calls(text: str) -> tuple[list[str], str]:
         found = _call_names(obj)
         if found:
             names += found
-            opened = _OPENS.search(text, cut, start)
-            if opened:
-                closed = _CLOSES["```" if opened.group(1).startswith("```") else "<tool_call>"].match(text, end)
-                if closed:
-                    start, end = opened.start(), closed.end()
+            if (opened := _TAG_OPEN.search(text, cut, start)):
+                start = opened.start()
+            if (closed := _TAG_CLOSE.match(text, end)):
+                end = closed.end()
+            if (opened := _FENCE_OPEN.search(text, cut, start)) and (closed := _FENCE_CLOSE.match(text, end)):
+                start, end = opened.start(), closed.end()
             kept.append(text[cut:start])
             cut = end
         pos = end
