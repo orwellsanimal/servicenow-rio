@@ -129,7 +129,7 @@ def test_unreadable_fields_reach_the_model_as_a_tool_error_not_a_crash(fake_verb
 
 
 def test_now_update_takes_values_as_a_json_string(fake_verbs, configured):
-    # Ollama 0.23.2 drops a qwen3 tool call holding a nested object, so the menu offers a string.
+    # qwen3 closes a nested object with "))" after a value holding "(", which Ollama drops (#11); the menu offers a string.
     now.load()
     u = next(s["function"] for s in schemas() if s["function"]["name"] == "now_update")
     assert u["parameters"]["properties"]["values"]["type"] == "string"

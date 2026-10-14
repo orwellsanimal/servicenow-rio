@@ -39,9 +39,10 @@ def _call(fn, **kwargs) -> Any:
 def _values(values: Any) -> dict:
     """now_update's `values`, which the menu offers as a JSON object in a string.
 
-    Ollama 0.23.2 drops a qwen3 tool call whose arguments hold a nested object: the model generates
-    it, and /api/chat returns no content and no tool_calls. A string argument parses. A dict is
-    still accepted, for a model or Ollama that gets nested objects right."""
+    With a nested object, qwen3:14b (Q4) closes it with `))` instead of `}}` when a value inside
+    holds a parenthesis ("ATF:TEST2 (rio check)"). That's invalid JSON, so Ollama 0.23.2 drops the
+    call: /api/chat returns no content and no tool_calls (#11). Inside a JSON string the model
+    closes it correctly. A dict is still accepted, for a model that gets nested objects right."""
     if isinstance(values, str):
         try:
             parsed = json.loads(values)
