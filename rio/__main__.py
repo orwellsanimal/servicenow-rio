@@ -60,7 +60,7 @@ def main(argv: list[str] | None = None) -> int:
             declined = result.startswith("Not done")
             print(f"rio> {result}\n")
             history.append({"role": "assistant",
-                            "content": f"[{card.tool} {'declined' if declined else 'approved and run'}] {result}"})
+                            "content": f"[{card.tool} {approval.outcome(result)}] {result}"})
             card = None
             if not declined or _PLAIN_NO.match(text):
                 continue                # a yes ran the call; a plain no is just an answer

@@ -8,7 +8,9 @@
 #     through execute_tool, and the reply is the tool's own result (no model turn between the
 #     operator's yes and the write, which is where whitcortex's unasked writes came from);
 #     anything else runs nothing;
-#   * in memory on purpose: a restart drops the card.
+#   * in memory on purpose: a restart drops the card;
+#   * under RIO_READ_ONLY no card is made and the preview is never called: a write the model names
+#     anyway (models call tools they weren't offered) gets the read-only refusal (ADR-0003).
 
 from __future__ import annotations
 
@@ -17,7 +19,8 @@ import json
 import re
 from dataclasses import dataclass
 
-from rio.tools import TOOLS, execute_tool
+from rio import config
+from rio.tools import TOOLS, execute_tool, read_only_refusal
 from rio.tools.errors import ToolError
 
 _YES = re.compile(r"\s*(y|yes)\s*[.!]?\s*$", re.IGNORECASE)
@@ -41,6 +44,8 @@ def park(tool: str, args: dict) -> Card | str:
     t = TOOLS.get(tool)
     if t is None or not t.writes:
         return f"Tool error: {tool!r} is not a write tool; nothing to approve."
+    if config.READ_ONLY:
+        return read_only_refusal(tool)
     if not isinstance(args, dict):
         return f"Tool error ({tool}): arguments must be a JSON object, got {type(args).__name__}."
     try:
@@ -61,3 +66,14 @@ def answer(card: Card, text: str) -> str:
     if _YES.match(text or ""):
         return execute_tool(card.tool, card.args, approved=True)
     return "Not done: nothing was changed."
+
+
+def outcome(result: str) -> str:
+    """How answer()'s result goes into the history the model reads next turn.
+
+    A "y" whose call failed is not "approved and run": the model would read that as done."""
+    if result.startswith("Not done"):
+        return "declined"
+    if result.startswith("Tool error"):
+        return "approved, failed"
+    return "approved and run"

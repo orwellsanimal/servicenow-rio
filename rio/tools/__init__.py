@@ -120,6 +120,11 @@ def _as_text(result: Any) -> str:
     return text
 
 
+def read_only_refusal(name: str) -> str:
+    """What a write gets under RIO_READ_ONLY, from the card and from execute_tool alike."""
+    return f"Tool error ({name}): rio is read-only here (RIO_READ_ONLY); nothing was changed."
+
+
 def execute_tool(name: str, args: Any, *, approved: bool = False) -> str:
     """Run a tool by name and return text for the model. Never raises for a tool's own failure.
 
@@ -132,7 +137,7 @@ def execute_tool(name: str, args: Any, *, approved: bool = False) -> str:
     if not isinstance(args, dict):
         return f"Tool error ({name}): arguments must be a JSON object, got {type(args).__name__}."
     if tool.writes and config.READ_ONLY:
-        return f"Tool error ({name}): rio is read-only here (RIO_READ_ONLY); nothing was changed."
+        return read_only_refusal(name)
     if tool.writes and not approved:
         return f"Tool error ({name}): a write runs only from an approved card; nothing was changed."
     try:

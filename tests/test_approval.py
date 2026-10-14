@@ -2,7 +2,7 @@
 
 import pytest
 
-from rio import approval
+from rio import approval, config
 from rio.tools import register
 from rio.tools.errors import ToolError
 
@@ -54,3 +54,46 @@ def test_a_call_that_cannot_work_is_not_parked(note_tool):
 def test_a_read_cannot_be_parked():
     register("read_it", group="sn", writes=False)(lambda: "ok")
     assert "not a write tool" in approval.park("read_it", {})
+
+
+def test_read_only_makes_no_card_and_never_previews(monkeypatch):
+    calls = []
+
+    def preview(number: str) -> str:
+        calls.append(("preview", number))
+        return "  would change it"
+
+    @register("fake_update", group="sn", writes=True, preview=preview)
+    def fake_update(number: str) -> str:
+        calls.append(("write", number))
+        return "changed"
+
+    monkeypatch.setattr(config, "READ_ONLY", True)
+    out = approval.park("fake_update", {"number": "abc"})
+    assert out == "Tool error (fake_update): rio is read-only here (RIO_READ_ONLY); nothing was changed."
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "result, label",
+    [
+        ("Not done: nothing was changed.", "declined"),
+        ("Tool error (add_note): no incident INC404", "approved, failed"),
+        ("Tool error (add_note): rio is read-only here (RIO_READ_ONLY); nothing was changed.", "approved, failed"),
+        ("noted on INC1", "approved and run"),
+    ],
+)
+def test_outcome_labels_a_failed_yes_as_failed(result, label):
+    assert approval.outcome(result) == label
+
+
+def test_a_yes_whose_call_fails_is_labelled_failed():
+    # The preview found the record; by the time of the "y" it is gone.
+    @register("close_it", group="sn", writes=True, preview=lambda number: f"  would close {number}")
+    def close_it(number: str) -> str:
+        raise ToolError(f"no incident {number}")
+
+    card = approval.park("close_it", {"number": "INC1"})
+    result = approval.answer(card, "y")
+    assert result == "Tool error (close_it): no incident INC1"
+    assert approval.outcome(result) == "approved, failed"
