@@ -202,3 +202,43 @@ def test_under_read_only_a_written_out_write_is_explained_as_read_only(instance,
     assert t.text == ("(After reading with now_query, the model wrote out a call to now_update as text instead of "
                       "making it. It did not run, and nothing was changed. rio is read-only here (RIO_READ_ONLY), "
                       "so now_update isn't offered.)")
+
+
+def test_a_real_code_block_next_to_a_written_out_call_keeps_its_fences(instance):
+    # #19 review: stripping every fence turned ```sql into a stray "sql" line.
+    reply = ('Here is the query I used:\n```sql\nSELECT * FROM incident\n```\n'
+             '```json\n{"name": "now_update", "arguments": {"sys_id": "a"}}\n```')
+    history = [{"role": "user", "content": "q"}]
+    t = turn.run(history, chat=FakeChat(Reply(content=reply)), model_caps=CAPS)
+    assert t.ok
+    assert history[-1]["content"] == "Here is the query I used:\n```sql\nSELECT * FROM incident\n```"
+    assert t.text.startswith("Here is the query I used:\n```sql\nSELECT * FROM incident\n```\n\n(The model wrote out")
+
+
+@pytest.mark.parametrize("reply", [
+    '[{"name": "now_update", "arguments": {"sys_id": "a"}}, {"name": "now_card", "parameters": {}}]',  # a list: no "[]" left
+    '{"type": "function", "function": {"name": "now_update", "arguments": {"sys_id": "a"}}}',          # the OpenAI shape
+])
+def test_lists_of_calls_and_the_openai_shape_are_cut_whole(instance, reply):
+    history = [{"role": "user", "content": "q"}]
+    t = turn.run(history, chat=FakeChat(Reply(content=reply)), model_caps=CAPS)
+    assert not t.ok and "[" not in t.text and "now_update" in t.text
+    assert history == [{"role": "user", "content": "q"}]
+
+
+def test_a_model_without_tools_is_told_why_no_tool_is_offered(instance):
+    reply = '{"name": "now_query", "arguments": {"table": "incident"}}'
+    t = turn.run([{"role": "user", "content": "q"}], chat=FakeChat(Reply(content=reply)),
+                 model_caps=frozenset({"completion"}))
+    assert t.text == ("(The model wrote out a call to now_query as text instead of making it. It did not run, "
+                      "and nothing was changed. rio offers no tools here: this model does not list the tools "
+                      "capability.)")
+
+
+@pytest.mark.parametrize("reply", [
+    '{"tool": "now_update", "args": {"sys_id": "a"}}',          # whitcortex's text protocol: not caught, on purpose
+    '[{"name": "now_update", "arguments": {}}, 3]',              # a list that isn't only calls
+])
+def test_shapes_left_alone_on_purpose(instance, reply):
+    t = turn.run([{"role": "user", "content": "q"}], chat=FakeChat(Reply(content=reply)), model_caps=CAPS)
+    assert (t.ok, t.text) == (True, reply)
