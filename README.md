@@ -44,8 +44,16 @@ py -3.12 --version   # Python 3.12.x. "py is not recognized": Python, or its py 
 ollama list          # lists qwen3:14b (or 8b). If not: ollama pull qwen3:14b
 ```
 
-If Python 3.12 is installed without the `py` launcher, use its full path in the first step below
-(for example `& "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe" -m venv venv`).
+If Python 3.12 is installed without the `py` launcher, use its full path in the first step below:
+`& "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe" -m venv venv` for a per-user install,
+or `& "C:\Program Files\Python312\python.exe" -m venv venv` for an all-users one.
+
+Behind a proxy with an allowlist, the install needs `pypi.org`, `files.pythonhosted.org`,
+`github.com` and `codeload.github.com` (GitHub redirects the archive download there).
+`ollama pull` needs `registry.ollama.ai` and `dd20bb891979d25aebc8bec07b2b3bbc.r2.cloudflarestorage.com`:
+the registry serves the manifest and small files itself, and redirects the multi-GB model layer
+to that Cloudflare storage host (measured 2026-10-14 on qwen3:14b; a `HEAD` request doesn't show
+the redirect, a `GET` does).
 
 Then, from the repo folder in PowerShell:
 
