@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from rio import config
@@ -83,17 +84,47 @@ def load() -> list[str]:
                          + (f" [warning: {warning}]" if warning else ""))
 
     if not config.INSTANCE_CONFIG_ROOT:
-        notes.append("now-config tools: off (INSTANCE_CONFIG_ROOT not set)")
+        notes.append("now-config tools: off (INSTANCE_CONFIG_ROOT not set; make one with "
+                     "`python -m rio.snapshot`, which prints the line to put in .env)")
+        return notes
+    other, warning = _snapshot_instance()
+    if other:
+        notes.append(f"now-config tools: off ({other})")
+        return notes
+    try:
+        cfg.use_snapshot(root=config.INSTANCE_CONFIG_ROOT)
+        cfg.now_role_exists(role="admin")  # loads one file: proves the path holds a snapshot
+    except Exception as e:
+        notes.append(f"now-config tools: off ({e})")
     else:
-        try:
-            cfg.use_snapshot(root=config.INSTANCE_CONFIG_ROOT)
-            cfg.now_role_exists(role="admin")  # loads one file: proves the path holds a snapshot
-        except Exception as e:
-            notes.append(f"now-config tools: off ({e})")
-        else:
-            _register_config()
-            notes.append("now-config tools: field_exists, choice_values")
+        _register_config()
+        notes.append("now-config tools: field_exists, choice_values" + (f" [warning: {warning}]" if warning else ""))
     return notes
+
+
+def _snapshot_instance() -> tuple[str, str]:
+    """Is the snapshot of the instance in SN_INSTANCE? Returns (off, warning) (#22).
+
+    A snapshot answers for the instance it came from: choice values differ between instances, so a
+    lab snapshot would give confident wrong answers about a work instance. Both exporters write
+    instance.json; a snapshot without one is used, with a warning."""
+    from now_data.client import instance_url
+
+    if not config.SN_INSTANCE:
+        return "", ""
+    try:
+        snap = json.loads((Path(config.INSTANCE_CONFIG_ROOT) / "instance.json").read_text(encoding="utf-8"))
+        theirs = instance_url(str(snap["instance_url"])).lower()
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+        return "", "can't tell which instance the snapshot is of (no readable instance.json)"
+    try:
+        ours = instance_url(config.SN_INSTANCE).lower()
+    except RuntimeError:  # sn_config_problem() reports it on the now-data line
+        return "", ""
+    if theirs != ours:
+        return (f"the snapshot is of {theirs}, but SN_INSTANCE is {ours}; "
+                "re-export it with `python -m rio.snapshot`"), ""
+    return "", ""
 
 
 def _check_fields() -> tuple[str, str]:

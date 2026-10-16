@@ -71,6 +71,19 @@ the venv: PowerShell reads a missing `venv\Scripts\python` as a module name. Fix
 The first run prints the model's capabilities and the decode speed of the first reply. That number
 decides whether `qwen3:14b` or `qwen3:8b` is the working model on this machine.
 
+**The snapshot tools.** `now_field_exists` and `now_choice_values` answer from an instance-config
+snapshot of *your* instance, because choice values differ between instances. Make one once, with
+the instance and identity in `.env`:
+
+```powershell
+.\venv\Scripts\python -m rio.snapshot   # writes .\snapshot\ and prints the INSTANCE_CONFIG_ROOT line for .env
+```
+
+It reads the instance's dictionary page by page, which takes about 7–8 minutes on a developer
+instance and longer on a larger one. It says how many rows its user couldn't read (`read N of M`);
+that's normal, and the snapshot can't answer for those rows. Re-run it after the instance changes.
+Rio refuses a snapshot taken from a different instance than `SN_INSTANCE`.
+
 ## Status
 
 - **Ollama client and chat loop:** capability-aware, local only, with the decode rate on every reply.
