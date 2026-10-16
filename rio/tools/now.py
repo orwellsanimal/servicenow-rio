@@ -69,10 +69,14 @@ def load() -> list[str]:
         return [f"now-* tools: not installed ({e.name}); see requirements.txt"]
 
     problem = config.sn_config_problem()
+    if not problem:
+        try:
+            client.configure(config.SN_INSTANCE, *config.sn_credentials())  # now-data normalises it
+        except client.ConfigError as e:  # e.g. a password of spaces, which sn_config_problem() lets by
+            problem = str(e)
     if problem:
         notes.append(f"now-data tools: off ({problem})")
     else:
-        client.configure(config.SN_INSTANCE, *config.sn_credentials())  # now-data normalises it
         off, warning = _check_fields()
         if off:
             notes.append(f"now-data tools: off ({off})")
@@ -87,44 +91,74 @@ def load() -> list[str]:
         notes.append("now-config tools: off (INSTANCE_CONFIG_ROOT not set; make one with "
                      "`python -m rio.snapshot`, which prints the line to put in .env)")
         return notes
-    other, warning = _snapshot_instance()
-    if other:
-        notes.append(f"now-config tools: off ({other})")
+    off = missing_schema(config.INSTANCE_CONFIG_ROOT) or _other_instance()
+    if off:
+        notes.append(f"now-config tools: off ({off})")
         return notes
     try:
         cfg.use_snapshot(root=config.INSTANCE_CONFIG_ROOT)
-        cfg.now_role_exists(role="admin")  # loads one file: proves the path holds a snapshot
+        cfg.now_field_exists(table="task", field="number")  # reads tables.json and columns.json
     except Exception as e:
         notes.append(f"now-config tools: off ({e})")
     else:
         _register_config()
-        notes.append("now-config tools: field_exists, choice_values" + (f" [warning: {warning}]" if warning else ""))
+        notes.append("now-config tools: field_exists, choice_values")
     return notes
 
 
-def _snapshot_instance() -> tuple[str, str]:
-    """Is the snapshot of the instance in SN_INSTANCE? Returns (off, warning) (#22).
+# What now_field_exists and now_choice_values read. The other snapshot files (properties, roles, ...)
+# are optional: the exporter skips one its user can't read, and these two tools don't need them.
+SCHEMA_FILES = ("schema/tables.json", "schema/columns.json", "schema/choices.json")
 
-    A snapshot answers for the instance it came from: choice values differ between instances, so a
-    lab snapshot would give confident wrong answers about a work instance. Both exporters write
-    instance.json; a snapshot without one is used, with a warning."""
+
+def missing_schema(root: str | Path) -> str:
+    """Why `root` can't serve the snapshot tools, or "" when it can. rio.snapshot asks the same
+    question before printing the INSTANCE_CONFIG_ROOT line, so the two never disagree."""
+    gone = [rel for rel in SCHEMA_FILES if not (Path(root).expanduser() / rel).is_file()]
+    if gone:
+        return f"{root} has no {', '.join(gone)}; run `python -m rio.snapshot` without --only"
+    return ""
+
+
+def _instance_key(url: str) -> tuple[str, int | None]:
+    """(host, port), ignoring case, scheme, path and a default port: how now-data's exporter tells
+    whether a folder already holds this instance's snapshot (now-mcp#16/#17)."""
+    from urllib.parse import urlsplit
+
     from now_data.client import instance_url
 
+    parts = urlsplit(instance_url(url))
+    return (parts.hostname or "").rstrip("."), None if parts.port in (None, 80, 443) else parts.port
+
+
+def _other_instance() -> str:
+    """Why the snapshot can't be trusted for SN_INSTANCE, or "" when it can (#22).
+
+    A snapshot answers for the instance it came from: choice values differ between instances, so a
+    lab snapshot would give confident wrong answers about a work instance. So this fails closed. A
+    snapshot without a readable instance.json is refused too: the exporter removes that file before
+    it writes and puts it back last, so its absence can mean a re-export died part-way and left two
+    instances' files mixed. With no SN_INSTANCE there is no instance to confuse it with."""
     if not config.SN_INSTANCE:
-        return "", ""
+        return ""
+    redo = "re-export it with `python -m rio.snapshot`"
     try:
-        snap = json.loads((Path(config.INSTANCE_CONFIG_ROOT) / "instance.json").read_text(encoding="utf-8"))
-        theirs = instance_url(str(snap["instance_url"])).lower()
-    except (OSError, ValueError, KeyError, TypeError, RuntimeError):
-        return "", "can't tell which instance the snapshot is of (no readable instance.json)"
+        ours = _instance_key(config.SN_INSTANCE)
+    except RuntimeError as e:  # now_data ConfigError: nothing to check the snapshot against
+        return f"can't check the snapshot against SN_INSTANCE ({e})"
     try:
-        ours = instance_url(config.SN_INSTANCE).lower()
-    except RuntimeError:  # sn_config_problem() reports it on the now-data line
-        return "", ""
+        snap = json.loads((Path(config.INSTANCE_CONFIG_ROOT).expanduser() / "instance.json").read_text(encoding="utf-8"))
+        url = snap["instance_url"]
+        if not isinstance(url, str):
+            raise TypeError(f"instance_url is a {type(url).__name__}")
+        theirs = _instance_key(url)
+    except OSError:
+        return f"the snapshot has no instance.json, so which instance it is of is unknown; {redo}"
+    except (ValueError, KeyError, TypeError, RuntimeError) as e:
+        return f"the snapshot's instance.json is unreadable ({type(e).__name__}: {e}); {redo}"
     if theirs != ours:
-        return (f"the snapshot is of {theirs}, but SN_INSTANCE is {ours}; "
-                "re-export it with `python -m rio.snapshot`"), ""
-    return "", ""
+        return f"the snapshot is of {theirs[0]}, but SN_INSTANCE is {ours[0]}; {redo}"
+    return ""
 
 
 def _check_fields() -> tuple[str, str]:

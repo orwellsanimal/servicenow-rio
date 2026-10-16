@@ -26,17 +26,28 @@ def main(argv: list[str] | None = None) -> int:
     except ImportError as e:
         print(f"now-data is not installed ({e.name}); see requirements.txt", file=sys.stderr)
         return 1
+    from rio.tools.now import missing_schema
+
     problem = config.sn_config_problem()
+    if not problem:
+        try:
+            client.configure(config.SN_INSTANCE, *config.sn_credentials())
+        except client.ConfigError as e:  # e.g. a password of spaces, which sn_config_problem() lets by
+            problem = str(e)
     if problem:
         print(f"Can't export: {problem}", file=sys.stderr)
         return 1
-    client.configure(config.SN_INSTANCE, *config.sn_credentials())
-    code = export.main(["--out", args.out] + (["--only", args.only] if args.only else []))
-    root = Path(args.out).resolve()
-    if code == 0 and (root / "schema" / "tables.json").is_file():
+    # Resolved as the exporter resolves it (PowerShell hands `~` through unexpanded).
+    root = Path(args.out).expanduser().resolve()
+    code = export.main(["--out", str(root)] + (["--only", args.only] if args.only else []))
+    if code != 0:
+        return code
+    # The same question rio's startup asks, so this never prints a line that rio then refuses.
+    why_not = missing_schema(root)
+    if why_not:
+        print(f"\nNot usable by rio yet: {why_not}.")
+    else:
         print(f"\nTo use it, set this in .env and restart rio:\nINSTANCE_CONFIG_ROOT={root}")
-    elif code == 0:  # e.g. --only security into an empty folder: now-config can't load it yet
-        print(f"\n{root} has no schema yet, which now-config needs: run it once without --only.")
     return code
 
 

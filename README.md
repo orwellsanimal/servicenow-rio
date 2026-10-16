@@ -82,7 +82,9 @@ the instance and identity in `.env`:
 It reads the instance's dictionary page by page, which takes about 7–8 minutes on a developer
 instance and longer on a larger one. It says how many rows its user couldn't read (`read N of M`);
 that's normal, and the snapshot can't answer for those rows. Re-run it after the instance changes.
-Rio refuses a snapshot taken from a different instance than `SN_INSTANCE`.
+Rio refuses a snapshot taken from a different instance than `SN_INSTANCE`, and one it can't
+place (no `instance.json`, which an interrupted re-export leaves behind). It needs only the schema
+files; the others (properties, roles, catalog) are skipped if your user can't read them.
 
 ## Status
 
