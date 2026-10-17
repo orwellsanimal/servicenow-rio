@@ -4,6 +4,8 @@
 # tools load when, that rio's credentials reach the library, and that now_update's card previews
 # with confirmed=False and only the approved card writes with confirmed=True.
 
+import json
+
 import pytest
 
 from rio import approval, config
@@ -43,20 +45,29 @@ def fake_verbs(monkeypatch):
     return calls
 
 
+def make_snapshot(root, instance_url="https://dev1.service-now.com"):
+    """The files rio checks before it trusts a snapshot (#22): the schema, and whose it is."""
+    for rel in now.SCHEMA_FILES:
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text("{}", encoding="utf-8")
+    (root / "instance.json").write_text(json.dumps({"instance_url": instance_url}), encoding="utf-8")
+    return root
+
+
 @pytest.fixture
-def configured(monkeypatch):
+def configured(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "SN_INSTANCE", "dev1")
     monkeypatch.setattr(config, "SN_IDENTITY", "legacy")
     monkeypatch.setenv("SN_USER", "alice")
     monkeypatch.setenv("SN_PASSWORD", "pw")
-    monkeypatch.setattr(config, "INSTANCE_CONFIG_ROOT", "C:/snap")
+    monkeypatch.setattr(config, "INSTANCE_CONFIG_ROOT", str(make_snapshot(tmp_path)))
 
 
 def test_rio_credentials_reach_the_library_and_the_tools_register(fake_verbs, configured):
     notes = now.load()
     # rio's SN_IDENTITY pair and SN_INSTANCE as given (now-data normalises it), not now-data's env lookup
     assert ("configure", ("dev1", "alice", "pw")) in fake_verbs
-    assert ("use_snapshot", {"root": "C:/snap"}) in fake_verbs
+    assert ("use_snapshot", {"root": config.INSTANCE_CONFIG_ROOT}) in fake_verbs
     assert set(TOOLS) == {"now_query", "now_get", "now_aggregate", "now_update",
                           "now_field_exists", "now_choice_values"}
     assert any(n.startswith("now-data tools: query") for n in notes)
