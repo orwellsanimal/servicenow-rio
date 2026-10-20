@@ -9,7 +9,7 @@
 #     (confirmed=False); only the approved card calls it with confirmed=True.
 # now-data (0.4.0+) checks every request against the table's fields and choice lists first and
 # refuses what ServiceNow would silently drop (state=new, an unknown field): the refusal is a
-# ValueError carrying the fix ("use state=1"), which _call hands the model as a tool error.
+# ValueError carrying the fix ("use state=1"), which call_verb hands the model as a tool error.
 # now_run_script is deliberately not offered: arbitrary server-side JavaScript is not something a
 # chat model should propose on a work instance.
 
@@ -28,13 +28,44 @@ from rio.tools.errors import ToolError
 _REFUSALS = (ValueError, NotImplementedError, LookupError)
 
 
-def _call(fn, **kwargs) -> Any:
+def _pysnc_answers() -> tuple[tuple[type[Exception], ...], tuple[type[Exception], ...]]:
+    """(refusals, errors): what PySNC raises when the instance answered. A refusal is on purpose:
+    a 401, a 403 (RoleException), an ACL'd query, a missing record. An error is any other 4xx or a
+    5xx (RequestException, RestException, InstanceException), which may be rio's own bad request or
+    a proxy's page, so it isn't called a refusal (whitcortex ADR-0065's wording). They subclass plain
+    Exception, so without this a non-admin account's 403 reads as a crash, and a caller that copes
+    with a refusal (the status card without its journal) can't (PR #24 review)."""
+    try:
+        from pysnc import exceptions as x
+    except ImportError:
+        return (), ()
+    return ((x.AuthenticationException, x.AuthorizationException, x.RoleException,
+             x.AclQueryException, x.NotFoundException),
+            (x.RestException, x.RequestException, x.InstanceException))
+
+
+_ANSWER_CHARS = 300     # a proxy's HTML error page arrives whole as the message (measured: 5,057)
+
+
+def _answer(e: Exception) -> str:
+    # RestException carries (inner exception, "403 - {...}"); the text is its last argument.
+    text = str(e.args[-1]) if e.args else str(e)
+    text = " ".join(text.split())
+    return text if len(text) <= _ANSWER_CHARS else text[:_ANSWER_CHARS] + "…"
+
+
+def call_verb(fn, **kwargs) -> Any:
+    refusals, errors = _pysnc_answers()
     try:
         return fn(**kwargs)
     except _REFUSALS as e:
         raise ToolError(str(e)) from e
     except RuntimeError as e:  # now_data.client.ConfigError, now_config.loader.SnapshotNotFound
         raise ToolError(str(e)) from e
+    except refusals as e:
+        raise ToolError(f"the instance refused it ({type(e).__name__}: {_answer(e)})") from e
+    except errors as e:
+        raise ToolError(f"the instance answered with an error ({type(e).__name__}: {_answer(e)})") from e
 
 
 def _values(values: Any) -> dict:
@@ -198,7 +229,7 @@ def _register_data() -> None:
           fields: comma-separated fields to return, e.g. number,short_description,state; keep it short
           limit: maximum rows, default 10
         """
-        out = _call(data.now_query, table=table, query=query, fields=fields, limit=limit,
+        out = call_verb(data.now_query, table=table, query=query, fields=fields, limit=limit,
                     display_value=True)
         if isinstance(out, dict) and out.get("truncated"):
             # count is len(rows) after the cap; a model reads it as the total (#9 review)
@@ -215,7 +246,7 @@ def _register_data() -> None:
           sys_id: the record's 32-character sys_id (not its number; use now_query for a number)
           fields: comma-separated fields to return; empty returns all of them
         """
-        return _call(data.now_get, table=table, sys_id=sys_id, fields=fields, display_value=True)
+        return call_verb(data.now_get, table=table, sys_id=sys_id, fields=fields, display_value=True)
 
     @register("now_aggregate", group="servicenow", writes=False)
     def now_aggregate(table: str, query: str = "", group_by: str = "") -> dict:
@@ -226,10 +257,10 @@ def _register_data() -> None:
           query: encoded query to filter first, e.g. active=true
           group_by: field to group the counts by, e.g. priority or assignment_group
         """
-        return _call(data.now_aggregate, table=table, query=query, group_by=group_by, count=True)
+        return call_verb(data.now_aggregate, table=table, query=query, group_by=group_by, count=True)
 
     def _update_preview(table: str, sys_id: str, values: str) -> str:
-        p = _call(data.now_update, table=table, sys_id=sys_id, values=_values(values), confirmed=False)
+        p = call_verb(data.now_update, table=table, sys_id=sys_id, values=_values(values), confirmed=False)
         lines = [f"  on {table} {sys_id}:"]
         lines += [f"    {c['field']}: {json.dumps(c['current'], default=str)} -> {json.dumps(c['proposed'], default=str)}"
                   for c in p.get("changes", [])] or ["    (no field would change)"]
@@ -246,7 +277,7 @@ def _register_data() -> None:
           sys_id: the record's 32-character sys_id
           values: the fields to set, as a JSON object in a string, e.g. {"state": "2", "work_notes": "..."}
         """
-        return _call(data.now_update, table=table, sys_id=sys_id, values=_values(values), confirmed=True)
+        return call_verb(data.now_update, table=table, sys_id=sys_id, values=_values(values), confirmed=True)
 
 
 
@@ -261,7 +292,7 @@ def _register_config() -> None:
           table: table name, e.g. incident
           field: field (column) name, e.g. cmdb_ci
         """
-        return _call(cfg.now_field_exists, table=table, field=field)
+        return call_verb(cfg.now_field_exists, table=table, field=field)
 
     @register("now_choice_values", group="servicenow", writes=False)
     def now_choice_values(table: str, field: str) -> list:
@@ -271,4 +302,4 @@ def _register_config() -> None:
           table: table name, e.g. incident
           field: choice field name, e.g. state or priority
         """
-        return _call(cfg.now_choice_values, table=table, field=field)
+        return call_verb(cfg.now_choice_values, table=table, field=field)

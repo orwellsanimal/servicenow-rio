@@ -93,8 +93,12 @@ files; the others (properties, roles, catalog) are skipped if your user can't re
   - from the live instance: `now_query`, `now_get`, `now_aggregate`;
   - from the instance-config snapshot: `now_field_exists`, `now_choice_values`;
   - one write: `now_update`.
+- **Status card:** type a record number (`INC0010023`, `status of CHG0000023`) and rio shows that
+  record's card itself, with no model turn: type, state, priority, short description, assignee
+  and group, the latest work note or comment, and the link. It works for any task record (INC,
+  CHG, CS, PRB, RITM, REQ, tasks). The model can ask for one too, with `sn_record_status`.
 - **Writes:** a write waits on an approval card that shows its real dry-run diff, and only `y` runs it ([ADR-0003](docs/architecture/0003-a-write-runs-only-from-an-approved-card.md)). With `RIO_READ_ONLY=true` there are no writes at all.
-- **Next:** the triage / enrich / resolve graphs and the status card (#1), then the operator commands, then the Fluent SDK pipeline.
+- **Next:** the triage / enrich / resolve graphs (#1), then the Fluent SDK pipeline.
 
 ## Conventions
 
