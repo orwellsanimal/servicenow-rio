@@ -13,7 +13,7 @@ def load() -> list[str]:
     """Register the workflow tools when now-data is up. Returns one banner line."""
     if "now_query" not in TOOLS:
         return ["record tools: off (they read through the now-data tools, which are off)"]
-    from rio import servicenow, triage
+    from rio import enrich, resolve, servicenow, triage
 
     @register("sn_record_status", group="servicenow", writes=False)
     def sn_record_status(number: str) -> str:
@@ -53,6 +53,44 @@ def load() -> list[str]:
         """
         return triage.apply(number, proposal)
 
-    return ["record tools: sn_record_status (or type a record number), sn_triage (or type "
-            "`triage <INC>`)" + ("" if config.READ_ONLY else "; `apply triage <INC>` applies one")]
+    @register("sn_resolve", group="servicenow", writes=True, preview=resolve.preview)
+    def sn_resolve(number: str) -> str:
+        """Resolve an incident that ALREADY carries its close code and close notes, and tag it from its own fields. The operator approves it on a card first.
+
+        Tags: its CI, subcategory (else category), alert source and close code. It never writes a
+        resolution itself: an incident without one, or already resolved, is refused and nothing
+        changes. Reports whether the linked Event Management alert closed (whitcortex #2627).
+
+        Args:
+          number: incident number, e.g. INC0010049
+        """
+        return resolve.run(number)
+
+    @register("sn_enrich", group="servicenow", writes=False)
+    def sn_enrich(number: str) -> str:
+        """Enrich an incident (DRY RUN) with what the instance holds: similar resolved incidents, matching CIs, the caller's context, published knowledge; changes nothing. Reply with the note as returned. Only the operator can post it, by typing `apply enrich <number>`; you cannot.
+
+        Each source says what it found or "nothing found", with a readiness verdict decided in code
+        (whitcortex #2630). It refuses an incident that is already resolved or closed.
+
+        Args:
+          number: incident number, e.g. INC0000059
+        """
+        return enrich.run(number)["shown"]
+
+    @register("sn_enrich_apply", group="servicenow", writes=True, preview=enrich.preview,
+              operator_only=True)
+    def sn_enrich_apply(number: str, proposal: str = "") -> str:
+        """Post the saved enrichment note on an incident and tag it, if it hasn't changed since.
+
+        Args:
+          number: incident number, e.g. INC0000059
+          proposal: the saved note's id, which the card shows and `y` must match
+        """
+        return enrich.apply(number, proposal)
+
+    return ["record tools: sn_record_status (or type a record number), sn_triage (`triage <INC>`), "
+            "sn_enrich (`enrich <INC>`)" + ("" if config.READ_ONLY else
+                                            "; `apply triage|enrich <INC>` writes one; sn_resolve "
+                                            "(`resolve <INC>`), on a card")]
 
