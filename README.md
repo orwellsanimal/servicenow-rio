@@ -102,8 +102,16 @@ files; the others (properties, roles, catalog) are skipped if your user can't re
   or reported as *not established*, and changes nothing. `apply triage INC0010023` then shows a card
   with the real diff of that saved proposal, and `y` applies it, if the incident hasn't changed
   since. The model can propose a triage but can't apply one.
-- **Writes:** a write waits on an approval card that shows its real dry-run diff, and only `y` runs it ([ADR-0003](docs/architecture/0003-a-write-runs-only-from-an-approved-card.md)). With `RIO_READ_ONLY=true` there are no writes at all.
-- **Next:** the enrich and resolve graphs (#1), then the Fluent SDK pipeline.
+- **Enrich:** type `enrich INC0000059` (or ask) for a dry run. It lists what the instance already holds
+  for the ticket: similar resolved incidents with their close notes, matching CIs, the caller's
+  context and published knowledge, each "found" or "nothing found". It adds a model summary and a
+  readiness verdict decided in code, and changes nothing. `apply enrich INC0000059` shows a card with
+  that exact note, and `y` posts it as one work note and tags the incident `enriched-by-rio`.
+- **Resolve:** `resolve INC0010049` (or ask) shows a card that resolves an incident that already
+  carries its close code and close notes, tagged from its own fields (CI, subcategory, alert source,
+  close code). It never writes a resolution itself.
+- **Writes:** a write waits on an approval card that shows its real dry-run diff, and only `y` runs it ([ADR-0003](docs/architecture/0003-a-write-runs-only-from-an-approved-card.md)). With `RIO_READ_ONLY=true` there are no writes at all; triage and enrich still give their dry runs.
+- **Next:** the Fluent SDK pipeline.
 
 ## Conventions
 

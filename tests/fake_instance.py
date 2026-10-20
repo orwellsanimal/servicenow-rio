@@ -43,6 +43,9 @@ COLUMNS = {
              "impact", "urgency", "opened_at"},
     "cmdb_ci": {"name", "operational_status", "install_status", "assigned_to", "short_description"},
     "sys_journal_field": {"element_id", "element", "value", "name"},
+    "label": {"name", "viewable_by", "type", "active", "owner"},
+    "label_entry": {"label", "table", "table_key", "title", "url"},
+    "em_alert": {"number", "state", "source", "incident"},
 }
 
 
@@ -72,7 +75,7 @@ def _condition(term: str):
     op = next((o for o in _OPERATORS if rest.startswith(o)), None)
     if op is None or op in _UNEVALUATED:
         raise AssertionError(f"fake instance: can't evaluate the operator in query term {term!r}")
-    value = rest[len(op):]
+    value = rest[len(op):].replace("^^", "^")     # a doubled caret is a literal one
     if value.lower().startswith("javascript:"):
         raise AssertionError(f"fake instance: doesn't run the script in {term!r}")
     values = value.split(",")
@@ -117,7 +120,8 @@ def parse(query: str):
     clauses: list[list] = []
     order: list[tuple[str, bool]] = []
     named: list[str] = []
-    for term in (query or "").split("^"):
+    # '^^' is a literal caret inside a value, not a separator (now-data query_check, measured)
+    for term in re.split(r"(?<!\^)\^(?!\^)", query or ""):
         if not term:
             continue
         if term.startswith("ORDERBYDESC"):
@@ -149,6 +153,10 @@ class FakeInstance:
         self.keep: set[str] = set()                 # fields a business rule keeps (see now_update)
         self.journal_hidden = False
         self.fail_update: Exception | None = None   # what a confirmed now_update raises
+        self.insert_override: dict[str, dict] = {}  # table -> fields a rule sets on insert
+        # choice labels a write shows afterwards, as the instance would
+        self.labels = {"state": {"1": "New", "2": "In Progress", "3": "On Hold", "6": "Resolved",
+                                 "7": "Closed", "8": "Canceled"}}
 
     @staticmethod
     def _ancestors(table: str) -> list[str]:
@@ -269,6 +277,7 @@ class FakeInstance:
         if self.fail_update is not None:
             raise self.fail_update
         landed, unconfirmed = [], []
+        wrote_journal = False
         # A field not on the record is not sent, and says why (now-mcp#18 review round 1)
         not_applied = [{"field": f, "requested": values[f], "actual": None, "reason": "unknown_field"}
                        for f in unknown]
@@ -281,10 +290,11 @@ class FakeInstance:
                     {"sys_id": f"jn{len(self.calls):030d}", "element_id": sys_id, "element": f, "value": v,
                      "sys_created_on": "2026-10-19 12:00:00", "sys_created_by": "rio"})
                 (unconfirmed if self.journal_hidden else landed).append(f)
+                wrote_journal = True
             else:
-                row[f] = (str(v), str(v))
+                row[f] = (str(v), self.labels.get(f, {}).get(str(v), str(v)))
                 landed.append(f)
-        if landed:
+        if landed or wrote_journal:      # the instance counts a note as an update, seen or not
             count = int(_parts(row.get("sys_mod_count"))[0] or 0) + 1
             row["sys_mod_count"] = (str(count), str(count))
         action = ("updated" if not not_applied else
@@ -293,8 +303,31 @@ class FakeInstance:
                 "changed_fields": landed, "not_applied": not_applied, "journal_unconfirmed": unconfirmed,
                 "no_ops": [], "unknown_fields": unknown}
 
-    def writes(self) -> list[dict]:
-        return [kw for verb, kw in self.calls if verb == "now_update" and kw["confirmed"]]
+    def now_insert(self, table, values, confirmed=False):
+        """now-data 0.6.0's shape: a preview, or a row read back. An unknown field is refused on the
+        confirmed path. `insert_override` is a business rule: {table: {field: value}} it sets on
+        insert, which the read-back reports as a difference."""
+        self.calls.append(("now_insert", {"table": table, "values": dict(values), "confirmed": confirmed}))
+        self._check(table, [])
+        unknown = sorted(set(values) - self.columns(table))
+        if not confirmed:
+            return {"confirmed": False, "action": "preview", "table": table, "values": dict(values),
+                    "unknown_fields": unknown}
+        if unknown:
+            from now_data.query_check import QueryRefused
+            raise QueryRefused(f"nothing was inserted: {table} has no field {', '.join(unknown)}")
+        rows = self.tables.setdefault(table, [])
+        sys_id = f"{len(self.calls):032x}"          # a sys_id is 32 hex characters
+        row = {"sys_id": sys_id, "sys_created_on": f"2026-10-19 13:{len(rows):02d}:00", **values,
+               **self.insert_override.get(table, {})}
+        rows.append(row)
+        differences = [{"field": f, "requested": v, "actual": _parts(row.get(f))[0]}
+                       for f, v in values.items() if _parts(row.get(f))[0] != str(v)]
+        return {"confirmed": True, "action": "inserted_with_differences" if differences else "inserted",
+                "sys_id": sys_id, "table": table, "differences": differences}
+
+    def writes(self, verb: str = "now_update") -> list[dict]:
+        return [kw for v, kw in self.calls if v == verb and kw["confirmed"]]
 
     def queries(self, table: str) -> list[dict]:
         return [kw for verb, kw in self.calls if verb == "now_query" and kw["table"] == table]
@@ -305,4 +338,5 @@ class FakeInstance:
         monkeypatch.setattr(verbs, "now_get", self.now_get)
         monkeypatch.setattr(verbs, "now_aggregate", self.now_aggregate)
         monkeypatch.setattr(verbs, "now_update", self.now_update)
+        monkeypatch.setattr(verbs, "now_insert", self.now_insert, raising=False)
         return self

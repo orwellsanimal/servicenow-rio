@@ -7,6 +7,9 @@
 #   triage <INC>                 the triage dry run (one model call for the classifier, not three)
 #   apply triage <INC>           a card for the saved proposal; only `y` applies it (rio#1 plan of
 #                                record: whitcortex applied on the typed command itself)
+#   enrich <INC>                 the enrichment dry run (the two model calls, no chat turn)
+#   apply enrich <INC>           a card for the saved note; `y` posts it and tags the incident
+#   resolve <INC>                the sn_resolve card, without a chat turn to ask for it
 # A sentence that mentions a number is not a command; it goes to the model.
 
 from __future__ import annotations
@@ -20,8 +23,11 @@ _STATUS_COMMAND = re.compile(
     r"^\s*(?:(?:sn\s+)?status\s+(?:of\s+|for\s+)?)?([A-Za-z]{2,10}\d{5,})\s*[.!?]?\s*$",
     re.IGNORECASE)
 _TRIAGE_COMMAND = re.compile(r"^\s*triage\s+(INC\d{5,})\s*[.!]?\s*$", re.IGNORECASE)
+_ENRICH_COMMAND = re.compile(r"^\s*enrich\s+(INC\d{5,})\s*[.!]?\s*$", re.IGNORECASE)
 _APPLY_COMMAND = re.compile(
-    r"^\s*(?:apply\s+triage|triage\s+apply)\s+(INC\d{5,})\s*[.!]?\s*$", re.IGNORECASE)
+    r"^\s*(?:apply\s+(?P<a>triage|enrich)|(?P<b>triage|enrich)\s+apply)\s+(?P<n>INC\d{5,})\s*[.!]?\s*$",
+    re.IGNORECASE)
+_RESOLVE_COMMAND = re.compile(r"^\s*resolve\s+(INC\d{5,})\s*[.!]?\s*$", re.IGNORECASE)
 _OFF = "the record tools are off (see the startup banner)."
 
 
@@ -44,11 +50,24 @@ def triage_number(text: str) -> str | None:
     return _number(_TRIAGE_COMMAND, text)
 
 
+def apply_target(text: str) -> tuple[str, str] | None:
+    """("triage" | "enrich", the number) for `apply triage INC0010023` / `triage apply …` /
+    `apply enrich …`, the whole message, any case, an optional '.' or '!', else None. A question or a
+    sentence that mentions it does not match: applying is the operator's typed decision, not
+    something to infer (whitcortex #2614)."""
+    m = _APPLY_COMMAND.match(text or "")
+    return ((m.group("a") or m.group("b")).lower(), m.group("n").upper()) if m else None
+
+
 def apply_number(text: str) -> str | None:
-    """`apply triage INC0010023` / `triage apply INC0010023`, the whole message, any case, an
-    optional '.' or '!', else None. A question or a sentence that mentions it does not match:
-    applying is the operator's typed decision, not something to infer (whitcortex #2614)."""
-    return _number(_APPLY_COMMAND, text)
+    """The number when the whole message is an apply command, else None."""
+    target = apply_target(text)
+    return target[1] if target else None
+
+
+def enrich_number(text: str) -> str | None:
+    """`enrich INC0000059`, the whole message, else None."""
+    return _number(_ENRICH_COMMAND, text)
 
 
 def _run(tool: str, number: str, refused: str) -> str:
@@ -65,21 +84,40 @@ def status_card(number: str) -> str:
     return _run("sn_record_status", number, "No status card for")
 
 
+def resolve_number(text: str) -> str | None:
+    """`resolve INC0010049`, the whole message, else None. It only parks the card; `y` resolves."""
+    return _number(_RESOLVE_COMMAND, text)
+
+
+def _card(tool: str, args: dict, label: str, refused: str):
+    """Park the card for a write the operator named. The card is the answer; nothing runs yet."""
+    if tool not in TOOLS:
+        return label, f"{refused}: {_OFF}", None
+    parked = approval.park(tool, args, operator=True)
+    if isinstance(parked, approval.Card):
+        return label, parked.render(), parked
+    return label, f"{refused}: {parked}", None
+
+
 def handle(text: str) -> tuple[str, str, approval.Card | None] | None:
     """(a label for the history, what to show, a card now waiting) when `text` is a command,
     else None."""
-    if number := apply_number(text):
-        if "sn_triage_apply" not in TOOLS:
-            return f"apply triage {number}", f"Not applied: {_OFF}", None
-        from rio import triage      # loaded once the record tools are, which need now-data
-        # The card names the proposal it shows, so `y` can't write a different one (PR #25 review).
-        parked = approval.park("sn_triage_apply", {"number": number, "proposal": triage.pending_id(number)},
-                               operator=True)
-        if isinstance(parked, approval.Card):
-            return f"apply triage {number}", parked.render(), parked
-        return f"apply triage {number}", f"Not applied: {parked}", None
+    if target := apply_target(text):
+        workflow, number = target
+        tool, label = f"sn_{workflow}_apply", f"apply {workflow} {number}"
+        if tool not in TOOLS:
+            return label, f"Not applied: {_OFF}", None
+        from rio import enrich, triage      # loaded once the record tools are, which need now-data
+        # The card names the saved proposal or note it shows, so `y` can't write a different one
+        # (PR #25 review).
+        pending = {"triage": triage.pending_id, "enrich": enrich.pending_id}[workflow](number)
+        return _card(tool, {"number": number, "proposal": pending}, label, "Not applied")
+    if number := resolve_number(text):
+        return _card("sn_resolve", {"number": number}, f"resolve {number}", "Not resolved")
     if number := triage_number(text):
         return f"sn_triage {number}", _run("sn_triage", number, "No triage for"), None
+    if number := enrich_number(text):
+        return f"sn_enrich {number}", _run("sn_enrich", number, "No enrichment for"), None
     if number := status_number(text):
         return f"sn_record_status {number}", status_card(number), None
     return None
