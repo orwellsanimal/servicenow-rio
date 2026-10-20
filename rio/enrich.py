@@ -436,8 +436,11 @@ def _save(number: str, saved: dict) -> None:
     path = _path(number)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(f".{secrets.token_hex(4)}.tmp")
-    tmp.write_text(json.dumps(saved, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        tmp.write_text(json.dumps(saved, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)     # a failed replace must not leave a copy of the note (PR #26)
 
 
 def pending_id(number: str) -> str:
@@ -548,10 +551,16 @@ def apply(number: str, proposal: str = "") -> str:
                         f"in its journal, so it MAY have landed; {number} was NOT tagged. Check the journal "
                         "before retrying: a retry would add a second note.")
     if noted.get("action") != "updated" or "work_notes" not in (noted.get("changed_fields") or []):
-        # Refused, not written: the note may be sent again, so the mark comes off.
-        _save(number, saved)
-        raise ToolError(f"The work note on {number} was not written ({noted.get('action')}); nothing was tagged.")
-    _path(number).unlink(missing_ok=True)      # the note is posted; the saved one is spent
+        # now-data answers not_applied / partially_applied only after the PATCH went out, so the note
+        # may be there (a journal column UI Meta doesn't type as one reads back ""). The mark stays, as
+        # it does on any exception: rio can't tell a refusal before sending from a failure after it, so
+        # only the operator, looking at the journal, clears it by running `enrich` again (PR #26 round 2).
+        raise ToolError(f"The instance answered {noted.get('action')} for the work note on {number}; nothing was "
+                        f"tagged. Check {number}'s work notes before anything else: the note may be there.")
+    try:
+        _path(number).unlink(missing_ok=True)  # the note is posted; the saved one is spent
+    except OSError:
+        pass                                   # still marked sent, so it can't be posted again either
     try:
         tagged = tagging.tag("incident", sys_id, number, [TAG])
     except Exception as e:

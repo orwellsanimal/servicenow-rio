@@ -38,8 +38,10 @@ def read_alert(incident_sys_id: str) -> dict | None:
         return None
     try:
         found = rows("em_alert", f"incident={incident_sys_id}", ("number", "state", "source"), limit=1)
-    except Exception:                   # no Event Management, or not readable: nothing to report
+    except ToolError:                   # no em_alert table, or this account can't read it: none to report
         return None
+    except Exception as e:              # a read that failed: the alert's source is a tag, so don't guess
+        raise ToolError(f"the Event Management alert couldn't be read ({type(e).__name__}: {e}); ask again") from e
     if not found:
         return None
     return {f: safe(found[0][f]["display"] or found[0][f]["value"]) for f in ("number", "state", "source")}
@@ -57,12 +59,15 @@ def refusal(record: dict) -> str:
     return ""
 
 
+def _raw_tags(record: dict, alert: dict | None) -> list[str]:
+    return [t for t in (record["cmdb_ci"]["display"],
+                        record["subcategory"]["display"] or record["category"]["display"],
+                        (alert or {}).get("source", ""),
+                        record["close_code"]["display"]) if t and t.strip()]
+
+
 def derive_tags(record: dict, alert: dict | None) -> list[str]:
-    tags = [record["cmdb_ci"]["display"],
-            record["subcategory"]["display"] or record["category"]["display"],
-            (alert or {}).get("source", ""),
-            record["close_code"]["display"]]
-    return tagging.names([t for t in tags if t])
+    return tagging.names(_raw_tags(record, alert))
 
 
 def _ready(number: str) -> tuple[dict, dict | None, list[str]]:
@@ -86,6 +91,10 @@ def preview(number: str) -> str:
     lines = [f"  resolve {number}: state {safe(record['state']['display'] or record['state']['value'])} -> "
              f"Resolved, with its recorded close code {safe(record['close_code']['display'])!r}",
              f"  tags first: {', '.join(tags)}"]
+    kept = {t.lower() for t in tags}
+    dropped = [safe(t) for t in _raw_tags(record, alert) if safe(t)[:tagging.LABEL_MAX].strip().lower() not in kept]
+    if dropped:                         # said, not silently left out (PR #26 review round 2)
+        lines.append(f"    not used as tags (a caret or a script prefix): {', '.join(dropped)}")
     if plan["new"]:
         lines.append(f"    new tags created: {', '.join(plan['new'])}")
     if plan["already"]:

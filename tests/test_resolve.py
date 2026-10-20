@@ -155,7 +155,7 @@ def test_an_insert_the_instance_did_not_keep_is_a_failure_that_names_the_row(ins
         tags.tag("incident", INC, "INC0010049", ["Brand new"])
     assert "Tag 'Brand new': created as label " in str(caught.value)
     assert "tagging INC0010049 stopped at 'Brand new'" in str(caught.value)
-    assert "active read back 'false', not 'true'" in str(caught.value) and "a second same-named tag" in str(caught.value)
+    assert "active read back 'false', not 'true'" in str(caught.value) and "a retry can create a second one" in str(caught.value)
 
 
 def test_a_derived_name_with_a_caret_is_dropped_and_a_comma_stays_one_tag(inst):

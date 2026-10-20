@@ -22,14 +22,14 @@ def names(raw: list[str]) -> list[str]:
     again, not re-created with a read-back that differs), blank and duplicate ones dropped (case
     aside, as the instance's `name=` matches), order kept.
 
-    A tag name is someone else's text (a CI's name, a choice label), and it goes into `name=<it>`.
-    A name holding a caret is dropped: whether `^^` reads as one literal caret for `=` is unmeasured,
-    and a name ending in one made `name=Edge^^^viewable_by…`, which no parser agrees on (PR #26
-    review). So is one with a script prefix or a comma (query_safe)."""
+    A tag name is someone else's text (a CI's name, a choice label), and it goes into `name=<it>`, so
+    it must be query_safe: no script prefix, and no caret. Whether `^^` reads as one literal caret for
+    `=` is unmeasured, and a name ending in one made `name=Edge^^^viewable_by…`, which no parser agrees
+    on (PR #26 review), so a name with a caret is dropped rather than escaped. A comma is fine in `=`."""
     out: dict[str, str] = {}
     for t in raw:
         name = safe(str(t))[:LABEL_MAX].strip()
-        if name and "^" not in name and query_safe(name) and name.lower() not in out:
+        if name and query_safe(name) and name.lower() not in out:
             out[name.lower()] = name
     return list(out.values())
 
@@ -39,8 +39,12 @@ def existing_tag(name: str) -> str:
     always the oldest (whitcortex PR #2628). `name` comes from names(), so it is query_safe."""
     found = rows("label", f"name={name}^viewable_by=everyone^active=true^ORDERBYsys_created_on",
                  ("sys_id",), limit=1)
-    tag_id = found[0]["sys_id"]["value"] if found else ""
-    return tag_id if is_sys_id(tag_id) else ""
+    if not found:
+        return ""
+    tag_id = found[0]["sys_id"]["value"]
+    if not is_sys_id(tag_id):           # found, but not an id rio can use: refuse, don't create a second
+        raise ToolError(f"the tag '{name}' exists with an id rio can't use ({tag_id!r})")
+    return tag_id
 
 
 def _tagged(tag_id: str, table: str, sys_id: str) -> bool:
@@ -84,13 +88,21 @@ def tag(table: str, sys_id: str, number: str, tags: list[str]) -> str:
         raise ToolError("no tags to add")
     added, already = [], []
     for name in wanted:
+        # What the step was decides what a retry risks: a lookup inserted nothing; a create may have
+        # left a label (a second same-named tag next time); an entry may have left one on the record
+        # (PR #26 review round 2).
+        step = "looking up the tag"
         try:
-            tag_id = existing_tag(name) or _insert(
-                "label", {"name": name, "viewable_by": "everyone", "type": "standard", "active": "true"},
-                f"Tag '{name}'")
+            tag_id = existing_tag(name)
+            if not tag_id:
+                step = "creating the tag"
+                tag_id = _insert("label", {"name": name, "viewable_by": "everyone", "type": "standard",
+                                           "active": "true"}, f"Tag '{name}'")
+            step = "looking up the tag on the record"
             if _tagged(tag_id, table, sys_id):
                 already.append(name)
                 continue
+            step = "putting the tag on the record"
             label = table.replace("_", " ").title()
             _insert("label_entry", {"label": tag_id, "table": table, "table_key": sys_id,
                                     "title": f"{label} - {number}",
@@ -98,9 +110,12 @@ def tag(table: str, sys_id: str, number: str, tags: list[str]) -> str:
                     f"Tag '{name}' on {number}")
         except Exception as e:
             on = ", ".join(added + already) or "none"
-            raise ToolError(f"tagging {number} stopped at '{name}' ({type(e).__name__}: {e}); tags on it "
-                            f"before that: {on}. Check the '{name}' tag and the record before asking again: "
-                            "a retry can create a second same-named tag") from e
+            risk = {"creating the tag": f" The '{name}' tag may exist now: check the tags before asking again, "
+                                        "or a retry can create a second one.",
+                    "putting the tag on the record": f" '{name}' may be on {number} now: check before asking again."
+                    }.get(step, " Nothing was written at that step.")
+            raise ToolError(f"tagging {number} stopped at '{name}', {step} ({type(e).__name__}: {e}); tags on it "
+                            f"before that: {on}.{risk}") from e
         added.append(name)
     parts = [f"Tagged {number}: {', '.join(added)}" if added else f"No new tags on {number}"]
     if already:

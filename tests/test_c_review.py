@@ -52,15 +52,28 @@ def test_a_dropped_connection_on_the_note_leaves_it_marked_sent(einst, monkeypat
     assert enrich.load_note("INC0000059")["sent_at"]
 
 
-def test_a_refused_note_can_be_sent_again(einst, monkeypatch):
+def test_a_note_the_instance_answered_not_applied_for_stays_marked(einst, monkeypatch):
+    """now-data answers not_applied only after the PATCH went out, so the note may be there: the
+    mark stays, and the retry says to look (PR #26 review round 2)."""
     enrich.run("INC0000059", chat=model())
     real = einst.now_update
     from now_data import verbs
     monkeypatch.setattr(verbs, "now_update", lambda *a, **k: {**real(*a, **k), "action": "not_applied",
                                                                "changed_fields": []} if k.get("confirmed") else real(*a, **k))
-    with pytest.raises(ToolError, match="was not written"):
+    with pytest.raises(ToolError, match="answered not_applied for the work note on INC0000059"):
         enrich.apply("INC0000059", enrich.pending_id("INC0000059"))
-    assert "sent_at" not in enrich.load_note("INC0000059")
+    assert enrich.load_note("INC0000059")["sent_at"]
+    _main(einst)["sys_mod_count"] = enrich.load_note("INC0000059")["sys_mod_count"]   # even if the count didn't move
+    shown, card = main.step("apply enrich INC0000059", [], None, CAPS, run=_no_chat)
+    assert card is None and "was sent to INC0000059" in shown[0]
+
+
+def test_a_failed_save_leaves_no_copy_of_the_note(einst, monkeypatch):
+    import os as _os
+    monkeypatch.setattr(enrich.os, "replace", lambda a, b: (_ for _ in ()).throw(PermissionError("locked")))
+    with pytest.raises(PermissionError):
+        enrich.run("INC0000059", chat=model())
+    assert list(enrich._path("INC0000059").parent.glob("*.tmp")) == []
 
 
 # ── 2. A failed read after the writes doesn't hide them ─────────────────────
@@ -183,3 +196,56 @@ def test_a_term_with_a_query_or_wildcard_character_never_reaches_a_like_chain():
     wildcards and operators), even where query_safe would let them by."""
     text = "50% off a=b x*y me@host !now <tag> file share"
     assert enrich.ground_terms(["50% off", "a=b", "x*y", "me@host", "!now", "<tag>", "file share"], text) == ["file share"]
+
+
+# ── Round 2 of the review ───────────────────────────────────────────────────
+
+def test_tagging_stopped_part_way_lists_the_tags_already_on_and_the_step(rinst):
+    rinst.insert_override = {"label": {"active": "false"}}             # Router exists; the next, new one fails
+    with pytest.raises(ToolError) as caught:
+        tags.tag("incident", "a" * 32, "INC0010049", ["Router", "Brand new"])
+    msg = str(caught.value)
+    assert "stopped at 'Brand new', creating the tag" in msg and "tags on it before that: Router." in msg
+
+
+def test_a_failed_lookup_says_nothing_was_written(rinst, monkeypatch):
+    import requests
+    monkeypatch.setattr(tags, "rows", lambda *a, **k: (_ for _ in ()).throw(requests.ConnectionError("reset")))
+    with pytest.raises(ToolError) as caught:
+        tags.tag("incident", "a" * 32, "INC0010049", ["Router"])
+    assert "looking up the tag" in str(caught.value) and "Nothing was written at that step." in str(caught.value)
+
+
+def test_a_found_tag_whose_id_is_not_a_sys_id_refuses_rather_than_creating_another(rinst):
+    rinst.tables["label"][0]["sys_id"] = "not-a-sys-id"
+    with pytest.raises(ToolError, match="exists with an id rio can't use"):
+        tags.existing_tag("Router")
+    with pytest.raises(ToolError, match="can't look up a tag entry"):
+        tags._tagged("not-a-sys-id", "incident", "a" * 32)
+
+
+def test_an_alert_read_that_fails_refuses_rather_than_dropping_the_source_tag(rinst, monkeypatch):
+    import requests
+    real = resolve.rows
+
+    def flaky(table, *a, **k):
+        if table == "em_alert":
+            raise requests.ConnectionError("reset")
+        return real(table, *a, **k)
+    monkeypatch.setattr(resolve, "rows", flaky)
+    out = approval.park("sn_resolve", {"number": "INC0010049"})
+    assert isinstance(out, str) and "the Event Management alert couldn't be read" in out
+
+
+def test_a_derived_tag_that_is_dropped_is_named_on_the_card(rinst):
+    _incident(rinst)["cmdb_ci"] = ("c" * 32, "Edge^1")
+    card = approval.park("sn_resolve", {"number": "INC0010049"})
+    assert "not used as tags (a caret or a script prefix): Edge^1" in card.preview
+
+
+def test_the_resolve_card_shows_instance_text_as_one_safe_line(rinst):
+    _incident(rinst)["state"] = ("1", "New\n  tags first: forged")
+    _incident(rinst)["close_code"] = ("Known error", "Known\x1b[2J error")
+    card = approval.park("sn_resolve", {"number": "INC0010049"})
+    assert not any(line.strip().startswith("tags first: forged") for line in card.preview.split("\n"))
+    assert "\x1b" not in card.preview
