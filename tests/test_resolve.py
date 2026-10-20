@@ -34,7 +34,7 @@ def tables(**incident):
         "incident": [row],
         "em_alert": [{"sys_id": "e" * 32, "incident": INC, "number": "Alert0010006", "state": "Open",
                       "source": "WhitCortex-HostLogs"}],
-        "label": [{"sys_id": "l" * 32, "name": "Router", "viewable_by": "everyone", "type": "standard",
+        "label": [{"sys_id": "c1" * 16, "name": "Router", "viewable_by": "everyone", "type": "standard",
                    "active": "true", "sys_created_on": "2026-01-01 00:00:00"}],
         "label_entry": [],
     }
@@ -92,17 +92,17 @@ def test_an_existing_tag_is_reused_and_entries_look_like_the_ui_makes_them(inst)
     _card_and_yes()
     labels = [r for r in inst.tables["label"] if r["name"] == "Router"]
     assert len(labels) == 1                              # reused, not duplicated
-    entry = next(e for e in inst.tables["label_entry"] if e["label"] == "l" * 32)
+    entry = next(e for e in inst.tables["label_entry"] if e["label"] == "c1" * 16)
     assert entry == {**entry, "table": "incident", "table_key": INC, "title": "Incident - INC0010049",
                      "url": f"incident.do?sys_id={INC}&sysparm_view="}
 
 
 def test_the_oldest_same_named_tag_is_the_one_reused(inst):
-    inst.tables["label"].append({"sys_id": "m" * 32, "name": "Router", "viewable_by": "everyone",
+    inst.tables["label"].append({"sys_id": "c2" * 16, "name": "Router", "viewable_by": "everyone",
                                  "type": "standard", "active": "true", "sys_created_on": "2026-06-01 00:00:00"})
     _card_and_yes()
-    assert {e["label"] for e in inst.tables["label_entry"] if e["title"] == "Incident - INC0010049"} >= {"l" * 32}
-    assert not any(e["label"] == "m" * 32 for e in inst.tables["label_entry"])
+    assert {e["label"] for e in inst.tables["label_entry"] if e["title"] == "Incident - INC0010049"} >= {"c1" * 16}
+    assert not any(e["label"] == "c2" * 16 for e in inst.tables["label_entry"])
 
 
 def test_derive_tags_falls_back_to_category_and_skips_blanks(inst):
@@ -154,19 +154,19 @@ def test_an_insert_the_instance_did_not_keep_is_a_failure_that_names_the_row(ins
     with pytest.raises(ToolError) as caught:
         tags.tag("incident", INC, "INC0010049", ["Brand new"])
     assert "Tag 'Brand new': created as label " in str(caught.value)
-    assert "active read back 'false', not 'true'. Do not retry" in str(caught.value)
+    assert "tagging INC0010049 stopped at 'Brand new'" in str(caught.value)
+    assert "active read back 'false', not 'true'" in str(caught.value) and "a second same-named tag" in str(caught.value)
 
 
-def test_a_comma_or_caret_inside_a_derived_name_stays_one_tag_and_one_query_term(inst):
-    """whitcortex PR #2628: a derived name may hold a comma. A caret would split the encoded query,
-    so it is doubled (a literal caret) when the tag is looked up."""
-    inst.tables["label"].append({"sys_id": "n" * 32, "name": "Acme, Inc ^ R1", "viewable_by": "everyone",
-                                 "type": "standard", "active": "true"})
-    _incident(inst)["cmdb_ci"] = ("c" * 32, "Acme, Inc ^ R1")
+def test_a_derived_name_with_a_caret_is_dropped_and_a_comma_stays_one_tag(inst):
+    """whitcortex PR #2628: a derived name may hold a comma, and stays one tag. A caret is dropped
+    (PR #26 review): whether `^^` is one literal caret for `=` is unmeasured, and a trailing one
+    made `name=Edge^^^viewable_by…`."""
+    _incident(inst)["cmdb_ci"] = ("c" * 32, "Acme ^ R1")
+    _incident(inst)["subcategory"] = ("router", "Router, edge")
     _, result = _card_and_yes()
-    assert "Tagged INC0010049: Acme, Inc ^ R1, Router" in result
-    assert any(e["label"] == "n" * 32 for e in inst.tables["label_entry"])    # found, not re-created
-    assert any("name=Acme, Inc ^^ R1^" in q["query"] for q in inst.queries("label"))
+    assert "Tagged INC0010049: Router, edge, WhitCortex-HostLogs, Known error." in result
+    assert not any("^^" in q["query"] or "Acme" in q["query"] for q in inst.queries("label"))
 
 
 def test_a_change_while_the_card_waits_is_refused_at_yes(inst):

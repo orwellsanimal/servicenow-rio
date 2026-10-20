@@ -265,8 +265,9 @@ def test_a_failed_tagging_says_the_note_landed(inst):
     inst.insert_override = {"label": {"active": "false"}}
     with pytest.raises(ToolError) as caught:
         g.apply("INC0000059", g.pending_id("INC0000059"))
-    assert str(caught.value).startswith("The work note is on INC0000059, but it was NOT tagged: Tag 'enriched-by-rio': created as label")
-    assert "Do not enrich it again (it would add a second note); tag it enriched-by-rio by hand." in str(caught.value)
+    assert str(caught.value).startswith("The work note is on INC0000059, but the tag may or may not be on it: "
+                                        "tagging INC0000059 stopped at 'enriched-by-rio'")
+    assert "Do not enrich it again (it would add a second note)" in str(caught.value)
 
 
 def test_a_field_changed_by_a_rule_during_the_run_is_reported(inst, monkeypatch):
@@ -287,7 +288,7 @@ def test_read_only_the_dry_run_works_and_apply_is_refused(inst, monkeypatch):
     monkeypatch.setattr(config, "READ_ONLY", True)
     monkeypatch.setattr(g.llm, "chat", model())          # the command runs with the real client
     shown, card = main.step("enrich INC0000059", [], None, CAPS, run=lambda *a, **k: pytest.fail("chat"))
-    assert card is None and shown[0].startswith("rio> Enrichment DRY RUN (nothing written; rio is read-only here)")
+    assert card is None and shown[0].startswith("rio> Enrichment DRY RUN (nothing written or kept; rio is read-only here)")
     shown, card = main.step("apply enrich INC0000059", [], None, CAPS, run=lambda *a, **k: pytest.fail("chat"))
     assert card is None and "rio is read-only here (RIO_READ_ONLY)" in shown[0] and _no_writes(inst)
 

@@ -33,7 +33,7 @@ from html import unescape
 from now_data import verbs as data
 
 from rio import config, llm, tags as tagging
-from rio.servicenow import incident_record, is_sys_id, record_number, rows, safe, ticket_text
+from rio.servicenow import incident_record, is_sys_id, query_safe, record_number, rows, safe, ticket_text
 from rio.tools.errors import ToolError
 from rio.tools.now import call_verb
 
@@ -95,7 +95,8 @@ def ground_terms(terms, text: str) -> list[str]:
     out: list[str] = []
     for raw in terms if isinstance(terms, list) else []:
         term = _squash(str(raw)) if isinstance(raw, str) else ""
-        if not term or not _TERM_CHARS.fullmatch(term):    # a '^' or ',' would widen a query
+        # a '^' or ',' would widen a query; query_safe is CLAUDE.md's rule, and a second guard here
+        if not term or not _TERM_CHARS.fullmatch(term) or not query_safe(term, in_list=True):
             continue
         if not _present(term, squashed) or term.lower() in (t.lower() for t in out):
             continue
@@ -430,6 +431,15 @@ def load_note(number: str) -> dict | None:
     return saved
 
 
+def _save(number: str, saved: dict) -> None:
+    """Whole or not at all, as triage's (PR #25 review round 2)."""
+    path = _path(number)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f".{secrets.token_hex(4)}.tmp")
+    tmp.write_text(json.dumps(saved, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def pending_id(number: str) -> str:
     """The id of the saved note, for the card the operator's command makes; "" when none or
     unreadable (the card's preview then says why)."""
@@ -459,16 +469,15 @@ def run(number: str, *, chat=None) -> dict:
         summary = f"not available ({e})"
     readiness = verdict(record, findings)
     note = render_note(record, terms, findings, summary, readiness)
-    path = _path(number)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f".{secrets.token_hex(4)}.tmp")    # whole or not at all, as triage's
-    tmp.write_text(json.dumps({
-        "id": secrets.token_hex(6), "number": number, "sys_id": record["sys_id"]["value"],
-        "instance": config.sn_instance_url(), "sys_mod_count": record["sys_mod_count"]["value"],
-        "note": note, "readiness": readiness[0],
-        "created": datetime.now().isoformat(timespec="seconds")}, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
-    head = ("Enrichment DRY RUN (nothing written; rio is read-only here)" if config.READ_ONLY else
+    if not config.READ_ONLY:
+        # Under RIO_READ_ONLY the note can never be posted, so nothing is kept: it holds the caller's
+        # name, department and location and other incidents' close notes (PR #26 review).
+        _save(number, {
+            "id": secrets.token_hex(6), "number": number, "sys_id": record["sys_id"]["value"],
+            "instance": config.sn_instance_url(), "sys_mod_count": record["sys_mod_count"]["value"],
+            "note": note, "readiness": readiness[0],
+            "created": datetime.now().isoformat(timespec="seconds")})
+    head = ("Enrichment DRY RUN (nothing written or kept; rio is read-only here)" if config.READ_ONLY else
             f"Enrichment DRY RUN (nothing written; to post it as a work note and tag it, type: apply enrich {number})")
     return {"number": number, "terms": terms, "findings": findings, "readiness": readiness[0],
             "note": note, "shown": f"{head}\n{note}"}
@@ -484,6 +493,12 @@ def _plan(number: str, proposal: str) -> tuple[dict, dict]:
     saved = load_note(number)
     if saved is None:
         raise ToolError(f"no enrichment for {number}; run `enrich {number}` first")
+    if saved.get("sent_at"):
+        # It was sent and its outcome isn't known: the only safe next step is to look. Running
+        # `enrich` again would make a new note, and posting that could make two (PR #26 review).
+        raise ToolError(f"this enrichment was sent to {number} at {saved['sent_at']} and whether it landed "
+                        f"is not confirmed; check {number}'s work notes. Only if it is not there, run "
+                        f"`enrich {number}` again")
     if not proposal or proposal != saved.get("id"):
         raise ToolError(f"the enrichment for {number} is not the one this card was made for; "
                         f"type `apply enrich {number}` again")
@@ -514,6 +529,9 @@ def apply(number: str, proposal: str = "") -> str:
     """ONE work note, THEN the tag; then every non-journal field compared with before."""
     saved, record = _plan(number, proposal)
     number, sys_id = record["number"]["value"], record["sys_id"]["value"]
+    # Marked sent BEFORE it goes: if the outcome is unknown (a dropped connection, an unconfirmed
+    # journal), the saved note can't be posted a second time (PR #26 review).
+    _save(number, {**saved, "sent_at": datetime.now().isoformat(timespec="seconds")})
     try:
         noted = call_verb(data.now_update, table="incident", sys_id=sys_id,
                           values={"work_notes": saved["note"]}, confirmed=True)
@@ -530,20 +548,23 @@ def apply(number: str, proposal: str = "") -> str:
                         f"in its journal, so it MAY have landed; {number} was NOT tagged. Check the journal "
                         "before retrying: a retry would add a second note.")
     if noted.get("action") != "updated" or "work_notes" not in (noted.get("changed_fields") or []):
+        # Refused, not written: the note may be sent again, so the mark comes off.
+        _save(number, saved)
         raise ToolError(f"The work note on {number} was not written ({noted.get('action')}); nothing was tagged.")
     _path(number).unlink(missing_ok=True)      # the note is posted; the saved one is spent
     try:
         tagged = tagging.tag("incident", sys_id, number, [TAG])
     except Exception as e:
-        raise ToolError(f"The work note is on {number}, but it was NOT tagged: {e} Do not enrich it again "
-                        f"(it would add a second note); tag it {TAG} by hand.") from e
+        # The tag insert itself may have landed and then failed to confirm (PR #26 review).
+        raise ToolError(f"The work note is on {number}, but the tag may or may not be on it: {e}. Do not enrich "
+                        f"it again (it would add a second note); check its tags and add {TAG} by hand if missing.") from e
     lines = [f"{number}: the enrichment note is posted (readiness: {saved.get('readiness', '?')}).", tagged]
     compared = sorted(f for f in record if f != "sys_mod_count")
     try:
         after = incident_record(number)
-    except ToolError as e:                     # both writes are done and confirmed by now
-        lines.append(f"The verification read after the writes failed ({e}); whether any other field "
-                     "changed was not established.")
+    except Exception as e:                     # both writes are done and confirmed by now (any failure)
+        lines.append(f"The verification read after the writes failed ({type(e).__name__}: {e}); whether any "
+                     "other field changed was not established.")
     else:
         changed = sorted(f for f in compared if after[f]["value"] != record[f]["value"])
         if changed:
@@ -552,5 +573,5 @@ def apply(number: str, proposal: str = "") -> str:
         else:
             # Only the fields read for triage are compared; sys_mod_count is excluded because the two
             # writes bump it. Said as what it is, not as "nothing changed".
-            lines.append(f"None of the {len(compared)} compared fields changed.")
+            lines.append(f"None of the {len(compared)} compared fields changed ({', '.join(compared)}).")
     return "\n".join(lines)

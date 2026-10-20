@@ -10,36 +10,43 @@ from __future__ import annotations
 
 from now_data import verbs as data
 
-from rio.servicenow import query_safe, rows
+from rio.servicenow import is_sys_id, query_safe, rows, safe
 from rio.tools.errors import ToolError
 from rio.tools.now import call_verb
-
 
 LABEL_MAX = 40     # label.name's max_length (UI Meta, dev442835, 2026-10-19): longer is cut on insert
 
 
-def literal(value: str) -> str:
-    """A value for `field=<value>` in an encoded query: a caret doubled is a literal caret, where
-    a single one would end the term and start another (now-data query_check, measured). A tag
-    name is derived from instance text (a CI's name), so it can hold one."""
-    return value.replace("^", "^^")
-
-
 def names(raw: list[str]) -> list[str]:
-    """Tag names: trimmed, cut to what label.name holds (so an existing cut tag is found again, not
-    re-created with a read-back that differs), blank and duplicate ones dropped, order kept. A name
-    holding a script prefix is dropped: it would run in the lookup (PR #25 review). Carets survive,
-    doubled by literal()."""
-    out = (" ".join(str(t).split())[:LABEL_MAX].strip() for t in raw)
-    return list(dict.fromkeys(n for n in out if n and query_safe(n.replace("^", ""))))
+    """Tag names: one safe line each, cut to what label.name holds (so an existing cut tag is found
+    again, not re-created with a read-back that differs), blank and duplicate ones dropped (case
+    aside, as the instance's `name=` matches), order kept.
+
+    A tag name is someone else's text (a CI's name, a choice label), and it goes into `name=<it>`.
+    A name holding a caret is dropped: whether `^^` reads as one literal caret for `=` is unmeasured,
+    and a name ending in one made `name=Edge^^^viewable_by…`, which no parser agrees on (PR #26
+    review). So is one with a script prefix or a comma (query_safe)."""
+    out: dict[str, str] = {}
+    for t in raw:
+        name = safe(str(t))[:LABEL_MAX].strip()
+        if name and "^" not in name and query_safe(name) and name.lower() not in out:
+            out[name.lower()] = name
+    return list(out.values())
 
 
 def existing_tag(name: str) -> str:
-    """The sys_id of the everyone-visible tag called `name`, or "". Several same-named tags: always
-    the oldest (whitcortex PR #2628)."""
-    found = rows("label", f"name={literal(name)}^viewable_by=everyone^active=true^ORDERBYsys_created_on",
+    """The sys_id of the everyone-visible, active tag called `name`, or "". Several same-named tags:
+    always the oldest (whitcortex PR #2628). `name` comes from names(), so it is query_safe."""
+    found = rows("label", f"name={name}^viewable_by=everyone^active=true^ORDERBYsys_created_on",
                  ("sys_id",), limit=1)
-    return found[0]["sys_id"]["value"] if found else ""
+    tag_id = found[0]["sys_id"]["value"] if found else ""
+    return tag_id if is_sys_id(tag_id) else ""
+
+
+def _tagged(tag_id: str, table: str, sys_id: str) -> bool:
+    if not (is_sys_id(tag_id) and is_sys_id(sys_id)):
+        raise ToolError(f"can't look up a tag entry with ids {tag_id!r} / {sys_id!r}")
+    return bool(rows("label_entry", f"label={tag_id}^table={table}^table_key={sys_id}", ("sys_id",), limit=1))
 
 
 def plan(table: str, sys_id: str, tags: list[str]) -> dict:
@@ -51,7 +58,7 @@ def plan(table: str, sys_id: str, tags: list[str]) -> dict:
         if not tag_id:
             out["new"].append(name)
             out["add"].append(name)
-        elif rows("label_entry", f"label={tag_id}^table={table}^table_key={sys_id}", ("sys_id",), limit=1):
+        elif _tagged(tag_id, table, sys_id):
             out["already"].append(name)
         else:
             out["add"].append(name)
@@ -63,30 +70,37 @@ def _insert(table: str, values: dict, what: str) -> str:
     if out.get("action") != "inserted":
         kept = "; ".join(f"{d['field']} read back {d['actual']!r}, not {d['requested']!r}"
                          for d in out.get("differences") or [])
-        raise ToolError(f"{what}: created as {table} {out.get('sys_id')}, but {kept or 'it differs'}. "
-                        "Do not retry; check the record.")
+        raise ToolError(f"{what}: created as {table} {out.get('sys_id')}, but {kept or 'it differs'}")
     return str(out["sys_id"])
 
 
 def tag(table: str, sys_id: str, number: str, tags: list[str]) -> str:
     """Put the tags on the record: an existing tag is reused, a missing one created, one the record
-    already has left as it is. Returns what happened, for the operator."""
+    already has left as it is. Returns what happened, for the operator. A failure part-way says
+    which tags are already on and where it stopped, so the caller can say what did happen (PR #26
+    review: a failed third tag read as nothing tagged)."""
     wanted = names(tags)
     if not wanted:
         raise ToolError("no tags to add")
     added, already = [], []
     for name in wanted:
-        tag_id = existing_tag(name) or _insert(
-            "label", {"name": name, "viewable_by": "everyone", "type": "standard", "active": "true"},
-            f"Tag '{name}'")
-        if rows("label_entry", f"label={tag_id}^table={table}^table_key={sys_id}", ("sys_id",), limit=1):
-            already.append(name)
-            continue
-        label = table.replace("_", " ").title()
-        _insert("label_entry", {"label": tag_id, "table": table, "table_key": sys_id,
-                                "title": f"{label} - {number}",
-                                "url": f"{table}.do?sys_id={sys_id}&sysparm_view="},
-                f"Tag '{name}' on {number}")
+        try:
+            tag_id = existing_tag(name) or _insert(
+                "label", {"name": name, "viewable_by": "everyone", "type": "standard", "active": "true"},
+                f"Tag '{name}'")
+            if _tagged(tag_id, table, sys_id):
+                already.append(name)
+                continue
+            label = table.replace("_", " ").title()
+            _insert("label_entry", {"label": tag_id, "table": table, "table_key": sys_id,
+                                    "title": f"{label} - {number}",
+                                    "url": f"{table}.do?sys_id={sys_id}&sysparm_view="},
+                    f"Tag '{name}' on {number}")
+        except Exception as e:
+            on = ", ".join(added + already) or "none"
+            raise ToolError(f"tagging {number} stopped at '{name}' ({type(e).__name__}: {e}); tags on it "
+                            f"before that: {on}. Check the '{name}' tag and the record before asking again: "
+                            "a retry can create a second same-named tag") from e
         added.append(name)
     parts = [f"Tagged {number}: {', '.join(added)}" if added else f"No new tags on {number}"]
     if already:

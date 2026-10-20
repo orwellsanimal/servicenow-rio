@@ -18,15 +18,17 @@ from __future__ import annotations
 from now_data import verbs as data
 
 from rio import tags as tagging
-from rio.servicenow import incident_record, is_sys_id, record_number, rows
+from rio.servicenow import incident_record, is_sys_id, record_number, rows, safe
 from rio.tools.errors import ToolError
 from rio.tools.now import call_verb
 
 _DONE_STATES = {"6": "Resolved", "7": "Closed", "8": "Canceled"}
 RESOLVED = "6"
 
-# number -> sys_mod_count the card was shown for; in memory, like the card itself (ADR-0003).
-_SHOWN: dict[str, str] = {}
+# number -> (sys_id, sys_mod_count, tags) the card was shown for; in memory, like the card itself
+# (ADR-0003). The tags too: a CI renamed while the card waits doesn't touch the incident, and `y`
+# must not put on a tag the card never showed (PR #26 review).
+_SHOWN: dict[str, tuple[str, str, tuple[str, ...]]] = {}
 
 
 def read_alert(incident_sys_id: str) -> dict | None:
@@ -36,11 +38,11 @@ def read_alert(incident_sys_id: str) -> dict | None:
         return None
     try:
         found = rows("em_alert", f"incident={incident_sys_id}", ("number", "state", "source"), limit=1)
-    except ToolError:
+    except Exception:                   # no Event Management, or not readable: nothing to report
         return None
     if not found:
         return None
-    return {f: found[0][f]["display"] or found[0][f]["value"] for f in ("number", "state", "source")}
+    return {f: safe(found[0][f]["display"] or found[0][f]["value"]) for f in ("number", "state", "source")}
 
 
 def refusal(record: dict) -> str:
@@ -80,9 +82,9 @@ def preview(number: str) -> str:
     record, alert, tags = _ready(number)
     number = record["number"]["value"]
     plan = tagging.plan("incident", record["sys_id"]["value"], tags)
-    _SHOWN[number] = (record["sys_id"]["value"], record["sys_mod_count"]["value"])
-    lines = [f"  resolve {number}: state {record['state']['display'] or record['state']['value']} -> Resolved, "
-             f"with its recorded close code {record['close_code']['display']!r}",
+    _SHOWN[number] = (record["sys_id"]["value"], record["sys_mod_count"]["value"], tuple(tags))
+    lines = [f"  resolve {number}: state {safe(record['state']['display'] or record['state']['value'])} -> "
+             f"Resolved, with its recorded close code {safe(record['close_code']['display'])!r}",
              f"  tags first: {', '.join(tags)}"]
     if plan["new"]:
         lines.append(f"    new tags created: {', '.join(plan['new'])}")
@@ -100,15 +102,21 @@ def run(number: str) -> str:
     shown = _SHOWN.pop(number, None)
     if shown is None:
         raise ToolError(f"no card was shown for resolving {number}; ask again")
-    shown_id, shown_count = shown
+    shown_id, shown_count, shown_tags = shown
     count = record["sys_mod_count"]["value"]
     # The same record, unchanged since the card: not another record that now has this number, and
     # not one whose count can't be read (PR #25 review, as triage's).
     if record["sys_id"]["value"] != shown_id or not count.isdigit() or count != shown_count:
         raise ToolError(f"{number} changed after the card was shown (sys_mod_count {shown_count} -> "
                         f"{count or 'unreadable'}); nothing was changed. Ask again.")
+    if tuple(tags) != shown_tags:
+        raise ToolError(f"the tags for {number} changed after the card was shown ({', '.join(shown_tags)} -> "
+                        f"{', '.join(tags)}); nothing was changed. Ask again.")
     sys_id = record["sys_id"]["value"]
-    tagged = tagging.tag("incident", sys_id, number, tags)
+    try:
+        tagged = tagging.tag("incident", sys_id, number, tags)
+    except ToolError as e:
+        raise ToolError(f"{number} was NOT resolved: {e}") from e
     try:
         result = call_verb(data.now_update, table="incident", sys_id=sys_id, values={"state": RESOLVED},
                            confirmed=True)
@@ -121,9 +129,14 @@ def run(number: str) -> str:
         kept = "; ".join(f"the instance kept {m['actual']!r}" for m in result.get("not_applied") or [])
         # A business rule or ACL can keep the state though the save answered 200 (whitcortex #2627).
         raise ToolError(f"{tagged} But it was NOT resolved: {kept or 'the state did not change'}.")
-    after = incident_record(number)
-    lines = [f"{number} is now {after['state']['display'] or after['state']['value']} "
-             f"({record['close_code']['display']}).", tagged]
+    # Both writes are done and read back by now-data from here on; what follows is the report, and a
+    # read that fails must not turn it into "failed" (PR #26 review).
+    try:
+        after = incident_record(number)
+        state = safe(after["state"]["display"] or after["state"]["value"])
+    except Exception as e:
+        state = f"Resolved (read back when saved; the report's read failed: {type(e).__name__})"
+    lines = [f"{number} is now {state} ({safe(record['close_code']['display'])}).", tagged]
     if alert:
         now = read_alert(sys_id) or {}
         lines.append(f"Alert {alert['number']}: {alert['state']} before, {now.get('state') or 'not readable'} now.")

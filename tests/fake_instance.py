@@ -277,6 +277,7 @@ class FakeInstance:
         if self.fail_update is not None:
             raise self.fail_update
         landed, unconfirmed = [], []
+        wrote_journal = False
         # A field not on the record is not sent, and says why (now-mcp#18 review round 1)
         not_applied = [{"field": f, "requested": values[f], "actual": None, "reason": "unknown_field"}
                        for f in unknown]
@@ -289,10 +290,11 @@ class FakeInstance:
                     {"sys_id": f"jn{len(self.calls):030d}", "element_id": sys_id, "element": f, "value": v,
                      "sys_created_on": "2026-10-19 12:00:00", "sys_created_by": "rio"})
                 (unconfirmed if self.journal_hidden else landed).append(f)
+                wrote_journal = True
             else:
                 row[f] = (str(v), self.labels.get(f, {}).get(str(v), str(v)))
                 landed.append(f)
-        if landed:
+        if landed or wrote_journal:      # the instance counts a note as an update, seen or not
             count = int(_parts(row.get("sys_mod_count"))[0] or 0) + 1
             row["sys_mod_count"] = (str(count), str(count))
         action = ("updated" if not not_applied else
@@ -315,7 +317,7 @@ class FakeInstance:
             from now_data.query_check import QueryRefused
             raise QueryRefused(f"nothing was inserted: {table} has no field {', '.join(unknown)}")
         rows = self.tables.setdefault(table, [])
-        sys_id = f"{table[:6]:x<6}{len(self.calls):026d}"
+        sys_id = f"{len(self.calls):032x}"          # a sys_id is 32 hex characters
         row = {"sys_id": sys_id, "sys_created_on": f"2026-10-19 13:{len(rows):02d}:00", **values,
                **self.insert_override.get(table, {})}
         rows.append(row)
