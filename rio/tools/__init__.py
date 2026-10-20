@@ -139,7 +139,9 @@ def execute_tool(name: str, args: Any, *, approved: bool = False) -> str:
     a caller forgot to check `is_write` first."""
     tool = TOOLS.get(name)
     if tool is None:
-        return f"Tool error: unknown tool {name!r}. Available: {', '.join(sorted(TOOLS)) or 'none'}."
+        # The model reads this: an operator_only tool's name stays off it, as it stays off the menu.
+        offered = sorted(n for n, t in TOOLS.items() if not t.operator_only)
+        return f"Tool error: unknown tool {name!r}. Available: {', '.join(offered) or 'none'}."
     if not isinstance(args, dict):
         return f"Tool error ({name}): arguments must be a JSON object, got {type(args).__name__}."
     if tool.writes and config.READ_ONLY:

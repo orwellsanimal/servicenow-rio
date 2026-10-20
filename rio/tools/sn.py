@@ -44,13 +44,14 @@ def load() -> list[str]:
     # The model never sees this one (#2614): `apply triage <number>` parks its card (rio.commands).
     @register("sn_triage_apply", group="servicenow", writes=True, preview=triage.preview,
               operator_only=True)
-    def sn_triage_apply(number: str) -> str:
+    def sn_triage_apply(number: str, proposal: str = "") -> str:
         """Apply the saved triage proposal for an incident, if it hasn't changed since.
 
         Args:
           number: incident number, e.g. INC0010023
+          proposal: the saved proposal's id, which the card shows and `y` must match
         """
-        return triage.apply(number)
+        return triage.apply(number, proposal)
 
     return ["record tools: sn_record_status (or type a record number), sn_triage (or type "
             "`triage <INC>`)" + ("" if config.READ_ONLY else "; `apply triage <INC>` applies one")]

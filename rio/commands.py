@@ -71,7 +71,10 @@ def handle(text: str) -> tuple[str, str, approval.Card | None] | None:
     if number := apply_number(text):
         if "sn_triage_apply" not in TOOLS:
             return f"apply triage {number}", f"Not applied: {_OFF}", None
-        parked = approval.park("sn_triage_apply", {"number": number}, operator=True)
+        from rio import triage      # loaded once the record tools are, which need now-data
+        # The card names the proposal it shows, so `y` can't write a different one (PR #25 review).
+        parked = approval.park("sn_triage_apply", {"number": number, "proposal": triage.pending_id(number)},
+                               operator=True)
         if isinstance(parked, approval.Card):
             return f"apply triage {number}", parked.render(), parked
         return f"apply triage {number}", f"Not applied: {parked}", None

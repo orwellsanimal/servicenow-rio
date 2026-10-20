@@ -141,9 +141,10 @@ def test_a_ci_named_in_the_text_is_found_by_name_not_by_reading_the_cmdb(inst):
     assert "dns01" in named[0]["query"].split("nameIN")[1].split(",")
 
 
-def test_name_candidates_are_longest_first_and_never_carry_a_query_separator():
+def test_name_candidates_are_shortest_first_and_never_carry_a_query_separator():
+    """PR #25 review: single words (hostnames) first, so a long ticket still looks them up."""
     names = g.name_candidates("Main DNS, server^x (dns01).")
-    assert names[0].count(" ") >= names[-1].count(" ")
+    assert names[0].count(" ") <= names[-1].count(" ")
     assert not any("^" in n or "," in n for n in names)
     assert "dns01" in names and "Main DNS" in names
 
@@ -404,7 +405,7 @@ def _proposed(loaded):
 def test_the_card_shows_the_real_diff_with_names(loaded):
     _proposed(loaded)
     shown, card = main.step("apply triage INC0000016", [], None, CAPS, run=lambda *a, **k: pytest.fail("chat"))
-    assert card is not None and card.tool == "sn_triage_apply" and card.args == {"number": "INC0000016"}
+    assert card is not None and card.tool == "sn_triage_apply" and card.args == {"number": "INC0000016", "proposal": g.pending_id("INC0000016")}
     text = shown[0]
     assert "APPROVAL NEEDED: sn_triage_apply" in text
     assert 'category: "hardware" -> "network" (Network / DNS)' in text
@@ -461,7 +462,7 @@ def test_a_field_a_business_rule_keeps_is_a_failure_and_no_note_is_written(loade
     _, card = main.step("apply triage INC0000016", [], None, CAPS, run=lambda *a, **k: pytest.fail("chat"))
     shown, _ = main.step("y", [], card, CAPS, run=lambda *a, **k: pytest.fail("chat"))
     assert "INC0000016 was saved, but nothing took; these did not: category (asked 'network'" in shown[0]
-    assert "No work note was added." in shown[0]
+    assert "No work note was added, and the proposal is kept." in shown[0]
     assert [w for w in loaded.writes() if "work_notes" in w["values"]] == []
 
 
@@ -469,7 +470,7 @@ def test_a_partial_apply_names_what_took(loaded):
     _proposed(loaded)
     loaded.keep = {"assignment_group"}
     with pytest.raises(ToolError) as caught:
-        g.apply("INC0000016")
+        g.apply("INC0000016", g.pending_id("INC0000016"))
     assert "these took: category, cmdb_ci, subcategory; these did not: assignment_group" in str(caught.value)
 
 
@@ -485,15 +486,16 @@ def test_a_failed_applied_note_says_the_fields_were_applied(loaded, monkeypatch)
     from now_data import verbs
     monkeypatch.setattr(verbs, "now_update", note_fails)
     with pytest.raises(ToolError) as caught:
-        g.apply("INC0000016")
+        g.apply("INC0000016", g.pending_id("INC0000016"))
     assert str(caught.value).startswith("Applied to INC0000016 and read back (assignment_group, category, "
-                                        "cmdb_ci, subcategory), but the 'applied' work note was not written")
+                                        "cmdb_ci, subcategory), but the 'applied' work note may "
+                                        "not have been written")
 
 
 def test_an_unconfirmed_note_is_said_as_unconfirmed_not_failed(loaded):
     _proposed(loaded)
     loaded.journal_hidden = True
-    assert "accepted but could not be confirmed in the journal" in g.apply("INC0000016")
+    assert "accepted but could not be confirmed in the journal" in g.apply("INC0000016", g.pending_id("INC0000016"))
 
 
 def test_nothing_proposed_means_no_card(loaded):

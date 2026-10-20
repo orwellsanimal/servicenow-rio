@@ -16,29 +16,39 @@
 # apply() later writes THAT proposal, not a fresh classification, and only from an approved card.
 #
 # Every read goes through the now-data verbs (rio.servicenow), so each one is field-checked first.
+# Ticket text reaches one query (`nameIN`), and only through query_safe() (PR #25 review: a short
+# description beginning `javascript:` would otherwise run on the instance).
 
 from __future__ import annotations
 
 import json
 import re
+import secrets
 from datetime import datetime
 
 from now_data import verbs as data
 
 from rio import config, llm
-from rio.servicenow import incident_record, record_number, rows, ticket_text
+from rio.servicenow import chunks, incident_record, query_safe, record_number, rows, safe, ticket_text
 from rio.tools.errors import ToolError
 from rio.tools.now import call_verb
 
 NONE = "none"               # the enum member meaning "no candidate fits"
 MAX_CIS = 15                # CI candidates offered to the model
 MIN_CI_NAME = 4             # shorter CI names match too much text to be evidence
+CI_NAME_MAX = 255           # cmdb_ci.name's max_length (UI Meta, dev442835, 2026-10-19): longer can't match
 GROUP_HISTORY = 500         # recent incidents read to learn which groups are used
+MAX_GROUPS = 40             # groups offered, most used first: each is a 32-character id in the prompt
 CHOICE_LIMIT = 1000         # now_query's own cap; a list this long may be incomplete
 NAME_WORDS = 4              # the longest CI name looked for, in words
 NAME_CHUNK = 100            # names per `nameIN` query, to keep the URL short
+ID_CHUNK = 100              # sys_ids per IN list, likewise
 MAX_NAMES = 1000            # word sequences looked up at most (a pasted log would be thousands)
 CI_ROWS = 200               # rows read per `nameIN` query (one name can be many CIs)
+# Of num_ctx, what the prompt may use: the reply (num_predict) needs the rest. Ollama drops the head of
+# a prompt that doesn't fit, silently, and the candidate lists are the bulk of it (PR #25 review).
+PROMPT_SHARE = 0.75
+CHARS_PER_TOKEN = 3         # conservative for ids and short labels; a sys_id is ~12 tokens
 
 
 # ── Candidates (read from the instance) ──────────────────────────────────────
@@ -66,20 +76,23 @@ _TOKEN_EDGE = "\"'()[]{}<>.,;:!?"
 
 
 def name_candidates(text: str) -> list[str]:
-    """The word sequences of the ticket text that could be a CI's name, longest first.
+    """The word sequences of the ticket text that could be a CI's name, shortest first.
 
     whitcortex read every operational CI and searched the text for each name. That is the whole
     CMDB per triage, and now_query stops at 1000 rows; a corporate CMDB is far larger. So rio asks
     the other way round: which of the text's own 1-to-4-word sequences are CI names (rio#1 plan of
-    record). A sequence with a caret or a comma can't go into `nameIN`, and isn't a name anyway."""
+    record). Single words go first: a hostname is the commonest CI name, and with longest first a
+    300-word ticket never got past its 2-word sequences before MAX_NAMES (PR #25 review). A sequence
+    that isn't query_safe can't go into `nameIN`, and one longer than a CI name can be can't match."""
     words = [w.strip(_TOKEN_EDGE) for w in text.split()]
     words = [w for w in words if w]
     seen: set[str] = set()
     out: list[str] = []
-    for n in range(NAME_WORDS, 0, -1):
+    for n in range(1, NAME_WORDS + 1):
         for i in range(len(words) - n + 1):
             name = " ".join(words[i:i + n])
-            if len(name) < MIN_CI_NAME or "^" in name or "," in name or name.lower() in seen:
+            if (not MIN_CI_NAME <= len(name) <= CI_NAME_MAX or name.lower() in seen
+                    or not query_safe(name, in_list=True)):
                 continue
             seen.add(name.lower())
             out.append(name)
@@ -105,10 +118,10 @@ def ci_candidates(record: dict) -> tuple[list[dict], bool]:
             add(r["sys_id"]["value"], r["name"]["value"], "assigned to the caller")
     names = name_candidates(text)
     named = []
-    for i in range(0, min(len(names), MAX_NAMES), NAME_CHUNK):
-        chunk = names[i:min(i + NAME_CHUNK, MAX_NAMES)]
+    for chunk in chunks(names[:MAX_NAMES], NAME_CHUNK):
         named += rows("cmdb_ci", f"operational_status=1^nameIN{','.join(chunk)}", ("sys_id", "name"), CI_ROWS)
-    # `nameIN` matched a whole name; this is whitcortex's whole-word check, kept as the decider.
+    # `nameIN` matched a whole name under the instance's collation (case- and accent-insensitive on
+    # MySQL-family instances); whitcortex's whole-word check against the text still decides.
     named = [r for r in named if len(r["name"]["value"].strip()) >= MIN_CI_NAME
              and re.search(rf"(?<!\w){re.escape(r['name']['value'].strip())}(?!\w)", text, re.I)]
     for r in sorted(named, key=lambda r: -len(r["name"]["value"])):   # most specific name first
@@ -117,30 +130,35 @@ def ci_candidates(record: dict) -> tuple[list[dict], bool]:
 
 
 def group_candidates() -> list[dict]:
-    """Active, assignable groups WITH MEMBERS that incidents are actually assigned to.
+    """Active, assignable groups WITH MEMBERS that incidents are actually assigned to, the most used
+    first, at most MAX_GROUPS.
 
     Measured on dev442835 (2026-10-10): 78 active groups, mostly approvers and Studio users;
     ServiceNow's `itil` type marks only 3 approval groups. What incidents really go to is the
-    honest candidate set (whitcortex #2597). Three reads, however many groups: whitcortex asked
-    each group for a member in turn, and here the member check is one grouped count."""
-    used: dict[str, str] = {}
+    honest candidate set (whitcortex #2597). The member check is one grouped count per chunk of ids,
+    where whitcortex asked each group in turn."""
+    used: dict[str, int] = {}
     for r in rows("incident", "assignment_groupISNOTEMPTY^ORDERBYDESCsys_created_on",
                   ("assignment_group",), GROUP_HISTORY):    # "recent" means ordered (PR #2612 review)
-        used.setdefault(r["assignment_group"]["value"], r["assignment_group"]["display"])
-    if not used:
-        return []
-    ids = ",".join(used)
-    groups = rows("sys_user_group", f"sys_idIN{ids}^active=true", ("sys_id", "name", "type"), len(used))
-    members = call_verb(data.now_aggregate, table="sys_user_grmember", query=f"groupIN{ids}",
-                        group_by="group", count=True, display_value=False)
+        group = r["assignment_group"]["value"]
+        used[group] = used.get(group, 0) + 1
     out = []
-    for g in groups:
-        sys_id = g["sys_id"]["value"]
-        if "Non-Assignable" in g["type"]["display"]:
-            continue
-        if int((members.get(sys_id) or {}).get("count") or 0) > 0:
-            out.append({"sys_id": sys_id, "name": g["name"]["value"], "why": "incidents are assigned here"})
-    return sorted(out, key=lambda g: g["name"].lower())
+    for ids in chunks(list(used), ID_CHUNK):
+        joined = ",".join(ids)
+        groups = rows("sys_user_group", f"sys_idIN{joined}^active=true", ("sys_id", "name", "type"), len(ids))
+        members = call_verb(data.now_aggregate, table="sys_user_grmember", query=f"groupIN{joined}",
+                            group_by="group", count=True, display_value=False)
+        for g in groups:
+            sys_id, kind = g["sys_id"]["value"], g["type"]
+            # A type this account can't read (a value, no display) may be Non-Assignable: left out,
+            # not offered (PR #25 review: whitcortex's check passed it).
+            if "Non-Assignable" in kind["display"] or (kind["value"] and kind["display"] == kind["value"]):
+                continue
+            if int((members.get(sys_id) or {}).get("count") or 0) > 0:
+                out.append({"sys_id": sys_id, "name": g["name"]["value"], "why": "incidents are assigned here",
+                            "_uses": used[sys_id]})
+    out = sorted(out, key=lambda g: -g["_uses"])[:MAX_GROUPS]
+    return sorted(({k: v for k, v in g.items() if k != "_uses"} for g in out), key=lambda g: g["name"].lower())
 
 
 def groups_the_assignee_is_in(groups: list[dict], assignee: str) -> list[dict]:
@@ -153,9 +171,10 @@ def groups_the_assignee_is_in(groups: list[dict], assignee: str) -> list[dict]:
     a group offered here passes the rule."""
     if not assignee or not groups:
         return groups
-    ids = ",".join(g["sys_id"] for g in groups)
-    mine = {r["group"]["value"] for r in rows("sys_user_grmember", f"user={assignee}^groupIN{ids}",
-                                              ("group",), len(groups))}
+    mine: set[str] = set()
+    for ids in chunks([g["sys_id"] for g in groups], ID_CHUNK):
+        mine |= {r["group"]["value"] for r in rows("sys_user_grmember", f"user={assignee}^groupIN{','.join(ids)}",
+                                                   ("group",), len(ids))}
     return [g for g in groups if g["sys_id"] in mine]
 
 
@@ -208,9 +227,17 @@ def _prompt(record: dict, candidates: dict) -> list[dict]:
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
-def classify(record: dict, candidates: dict, *, chat=llm.chat) -> dict:
-    """One local call. Raises on a failed or unparseable reply: no proposal follows it."""
-    reply = chat(_prompt(record, candidates), format=triage_schema(candidates), think=False)
+def classify(record: dict, candidates: dict, *, chat=None) -> dict:
+    """One local call. Raises on a failed or unparseable reply, and before the call when the prompt
+    and its schema can't fit num_ctx: no proposal follows either."""
+    messages, schema = _prompt(record, candidates), triage_schema(candidates)
+    size = (sum(len(m["content"]) for m in messages) + len(json.dumps(schema))) // CHARS_PER_TOKEN
+    budget = int(config.NUM_CTX * PROMPT_SHARE)
+    if size > budget:
+        raise ToolError(f"the candidates are too many for num_ctx {config.NUM_CTX} (about {size} tokens "
+                        f"of prompt, {budget} allowed): {len(candidates['categories'])} category pairs, "
+                        f"{len(candidates['groups'])} groups. Raise NUM_CTX, or triage by hand")
+    reply = (chat or llm.chat)(messages, format=schema, think=False)
     if not reply.ok or not reply.content.strip():
         raise ToolError(f"the local model gave no usable reply ({reply.error or 'empty'})")
     try:
@@ -286,6 +313,9 @@ def validate(record: dict, candidates: dict, picks: dict) -> dict:
         else:
             entry.update(value=value, label=allowed[value].get("label") or allowed[value]["name"],
                          status="proposed", reason=allowed[value].get("why", ""))
+        if field == "category" and entry["value"]:
+            # The pair's own parts, not the key split on "/": a choice value may hold a "/" (PR #25 review)
+            entry.update(category=allowed[value]["category"], subcategory=allowed[value]["subcategory"])
         proposal[field] = entry
     return proposal
 
@@ -295,10 +325,9 @@ def update_values(proposal: dict) -> dict:
     values = {}
     cat = proposal["category"]
     if cat["status"] == "proposed":
-        category, _, sub = cat["value"].partition("/")
-        values["category"] = category
-        if sub:
-            values["subcategory"] = sub
+        values["category"] = cat["category"]
+        if cat["subcategory"]:
+            values["subcategory"] = cat["subcategory"]
     for field in ("cmdb_ci", "assignment_group"):
         if proposal[field]["status"] == "proposed":
             values[field] = proposal[field]["value"]
@@ -306,6 +335,9 @@ def update_values(proposal: dict) -> dict:
 
 
 def render_note(number: str, proposal: dict, *, applied: bool = False, capped: list[str] = ()) -> str:
+    """The proposal as lines of text. Labels, quotes and reasons come from the instance and the ticket,
+    so each goes through safe(): a line break in a CI name must not draw a line of its own on the
+    card (PR #25 review)."""
     if applied:
         head = "Triage APPLIED (local model, reviewed proposal):"
     elif config.READ_ONLY:
@@ -315,14 +347,16 @@ def render_note(number: str, proposal: dict, *, applied: bool = False, capped: l
     lines = [f"{head} {number}"]
     names = {"category": "Category", "cmdb_ci": "CI", "assignment_group": "Assignment group"}
     for field, e in proposal.items():
+        label, reason, evidence = safe(e["label"]), safe(e["reason"]), safe(e["evidence"])
         if e["status"] == "not established":
-            lines.append(f"- {names[field]}: not established ({e['reason']}).")
+            lines.append(f"- {names[field]}: not established ({reason}).")
         elif e["status"] == "unchanged":
             # Nothing is written for an unchanged pick, so its evidence (which the unchanged
             # branches never check) is not shown as if it were a quote (whitcortex PR #2647 review).
-            lines.append(f"- {names[field]}: {e['label']} [unchanged]; {e['reason']}.")
+            lines.append(f"- {names[field]}: {label} [unchanged]; {reason}.")
         else:
-            lines.append(f"- {names[field]}: {e['label']} [{e['status']}]; evidence: \"{e['evidence']}\"")
+            status = "applied" if applied else e["status"]
+            lines.append(f"- {names[field]}: {label} [{status}]; evidence: \"{evidence}\"")
     if capped:
         lines.append(f"- Note: the {' and the '.join(capped)} hit a read limit; some candidates may be missing.")
     lines.append("Generated by rio sn_triage on local inference (rio#1, whitcortex #2597).")
@@ -335,13 +369,16 @@ def _path(number: str):
     return config.STATE_DIR / "triage" / f"{record_number(number)}.json"
 
 
-def save_proposal(record: dict, proposal: dict) -> None:
+def save_proposal(record: dict, proposal: dict) -> dict:
+    """Save it with what binds it: an id the card carries, the record's sys_id, and the instance."""
+    saved = {"id": secrets.token_hex(6), "number": record["number"]["value"],
+             "sys_id": record["sys_id"]["value"], "instance": config.sn_instance_url(),
+             "sys_mod_count": record["sys_mod_count"]["value"], "proposal": proposal,
+             "created": datetime.now().isoformat(timespec="seconds")}
     path = _path(record["number"]["value"])
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({
-        "number": record["number"]["value"], "sys_id": record["sys_id"]["value"],
-        "sys_mod_count": record["sys_mod_count"]["value"], "proposal": proposal,
-        "created": datetime.now().isoformat(timespec="seconds")}, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(saved, indent=2), encoding="utf-8")
+    return saved
 
 
 def load_proposal(number: str) -> dict | None:
@@ -349,12 +386,20 @@ def load_proposal(number: str) -> dict | None:
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
 
 
+def pending_id(number: str) -> str:
+    """The id of the saved proposal, for the card the operator's command makes; "" when none."""
+    saved = load_proposal(number)
+    return str(saved.get("id") or "") if saved else ""
+
+
 # ── The dry run ──────────────────────────────────────────────────────────────
 
-def run(number: str, *, chat=llm.chat) -> dict:
+def run(number: str, *, chat=None) -> dict:
     """Propose and save. Changes nothing on the instance."""
     record = incident_record(number)
     number = record["number"]["value"]
+    # A re-run replaces the proposal; if it fails, the old one must not stay applicable (PR #25 review).
+    _path(number).unlink(missing_ok=True)
     candidates = gather(record)
     proposal = validate(record, candidates, classify(record, candidates, chat=chat))
     save_proposal(record, proposal)
@@ -364,18 +409,31 @@ def run(number: str, *, chat=llm.chat) -> dict:
 
 # ── Apply (from an approved card only) ───────────────────────────────────────
 
-def _plan(number: str) -> tuple[dict, dict, dict]:
+def _plan(number: str, proposal: str) -> tuple[dict, dict, dict]:
     """(saved proposal, the incident now, the values to write), or a refusal. Asked twice: when
-    the card is made, and again when the operator says yes, since the card can wait."""
+    the card is made, and again when the operator says yes, since the card can wait.
+
+    The card carries the proposal's id, so `y` writes the proposal that card showed and no other (a
+    second rio sharing RIO_STATE_DIR may have re-triaged meanwhile), and the proposal must still be
+    for this record on this instance (PR #25 review)."""
     number = record_number(number)
     saved = load_proposal(number)
     if saved is None:
         raise ToolError(f"no triage proposal for {number}; run `triage {number}` first")
+    if not proposal or proposal != saved.get("id"):
+        raise ToolError(f"the triage proposal for {number} is not the one this card was made for; "
+                        f"type `apply triage {number}` again")
+    if saved.get("instance") != config.sn_instance_url():
+        raise ToolError(f"the triage proposal for {number} was made on {saved.get('instance') or 'another instance'}, "
+                        f"not {config.sn_instance_url()}; run `triage {number}` again")
     record = incident_record(number)
-    if record["sys_mod_count"]["value"] != saved["sys_mod_count"]:
+    if record["sys_id"]["value"] != saved["sys_id"]:
+        raise ToolError(f"{number} is now another record (sys_id {record['sys_id']['value']}, not "
+                        f"{saved['sys_id']}); run `triage {number}` again")
+    count = record["sys_mod_count"]["value"]
+    if not count.isdigit() or count != saved["sys_mod_count"]:
         raise ToolError(f"{number} has changed since the proposal (sys_mod_count "
-                        f"{saved['sys_mod_count']} -> {record['sys_mod_count']['value']}); "
-                        f"run `triage {number}` again")
+                        f"{saved['sys_mod_count']} -> {count or 'unreadable'}); run `triage {number}` again")
     values = update_values(saved["proposal"])
     if not values:
         raise ToolError(f"nothing to apply on {number}: no field was proposed")
@@ -384,43 +442,53 @@ def _plan(number: str) -> tuple[dict, dict, dict]:
 
 def _labels(proposal: dict) -> dict:
     """What each written value stands for, so the card shows a name beside a sys_id."""
-    cat = proposal["category"]["label"]
-    return {"category": cat, "subcategory": cat, "cmdb_ci": proposal["cmdb_ci"]["label"],
-            "assignment_group": proposal["assignment_group"]["label"]}
+    cat = safe(proposal["category"]["label"])
+    return {"category": cat, "subcategory": cat, "cmdb_ci": safe(proposal["cmdb_ci"]["label"]),
+            "assignment_group": safe(proposal["assignment_group"]["label"])}
 
 
-def preview(number: str) -> str:
-    """The card: what the proposal would set, as now_update's own dry run."""
-    saved, record, values = _plan(number)
+def preview(number: str, proposal: str = "") -> str:
+    """The card: what the proposal would set, as now_update's own dry run, and what it can't."""
+    saved, record, values = _plan(number, proposal)
     p = call_verb(data.now_update, table="incident", sys_id=record["sys_id"]["value"], values=values,
                   confirmed=False)
     labels = _labels(saved["proposal"])
-    lines = [f"  apply the saved triage proposal to {record['number']['value']} "
+    lines = [f"  apply triage proposal {saved['id']} to {record['number']['value']} "
              f"(made {saved.get('created', 'earlier')}):"]
-    lines += [f"    {c['field']}: {json.dumps(c['current'], default=str)} -> "
-              f"{json.dumps(c['proposed'], default=str)} ({labels.get(c['field'], '')})"
+    lines += [f"    {c['field']}: {safe(json.dumps(c['current'], default=str))} -> "
+              f"{safe(json.dumps(c['proposed'], default=str))} ({labels.get(c['field'], '')})"
               for c in p.get("changes", [])] or ["    (no field would change)"]
+    if p.get("unknown_fields"):
+        # A field this account can't read is not written; the card says so before "y" (PR #25 review).
+        lines.append(f"    not written, not a field this account can read: {', '.join(p['unknown_fields'])}")
     lines.append("  then a work note on the incident saying it was applied")
     return "\n".join(lines)
 
 
-def apply(number: str) -> str:
+def _missed(result: dict) -> str:
+    """now-data 0.6.0's not_applied, in the operator's words, by reason."""
+    why = {"unknown_field": "not a field this account can see; not sent",
+           "unreadable_field": "not readable by this account; not sent"}
+    return "; ".join(f"{m['field']} ({why.get(m.get('reason'), '')})" if m.get("reason") in why else
+                     f"{m['field']} (asked {m['requested']!r}, the instance kept {m['actual']!r})"
+                     for m in result.get("not_applied") or [])
+
+
+def apply(number: str, proposal: str = "") -> str:
     """Write the SAVED proposal if the incident hasn't changed since, confirm it landed, then note it.
 
     Runs only from the approved card (sn_triage_apply is operator_only, ADR-0003). now_update
     reads every field back (now-mcp#3), because a business rule can abort the whole update and
     ServiceNow still answers 200: the stock "Abort changes on group" rule did that to category and
     CI together on INC0000019 (whitcortex #2613)."""
-    saved, record, values = _plan(number)
+    saved, record, values = _plan(number, proposal)
     number, sys_id = record["number"]["value"], record["sys_id"]["value"]
     result = call_verb(data.now_update, table="incident", sys_id=sys_id, values=values, confirmed=True)
     landed = sorted(result.get("changed_fields") or [])
     if result.get("action") != "updated":
-        missed = "; ".join(f"{m['field']} (asked {m['requested']!r}, the instance kept {m['actual']!r})"
-                           for m in result.get("not_applied") or [])
         took = f"these took: {', '.join(landed)}; " if landed else "nothing took; "
-        raise ToolError(f"{number} was saved, but {took}these did not: {missed or 'unknown'}. "
-                        "A business rule or a data policy may have kept them. No work note was added.")
+        raise ToolError(f"{number} was saved, but {took}these did not: {_missed(result) or 'unknown'}. "
+                        "No work note was added, and the proposal is kept.")
     # The fields are applied and read back from here on; the proposal is spent (applied once).
     _path(number).unlink(missing_ok=True)
     applied = ", ".join(landed) or ", ".join(sorted(values))
@@ -428,12 +496,13 @@ def apply(number: str) -> str:
         noted = call_verb(data.now_update, table="incident", sys_id=sys_id,
                           values={"work_notes": render_note(number, saved["proposal"], applied=True)},
                           confirmed=True)
-    except ToolError as e:
+    except Exception as e:
         # Say what DID happen: a bare failure here would read as "nothing applied" and invite a retry
-        # (whitcortex PR #2612 review).
-        raise ToolError(f"Applied to {number} and read back ({applied}), but the 'applied' work note "
-                        f"was not written: {e}") from e
-    if noted.get("journal_unconfirmed"):
+        # (whitcortex PR #2612 review). Any failure, not only a refusal: a dropped connection after the
+        # fields landed is the same story (PR #25 review), and "may not" because it may have landed.
+        raise ToolError(f"Applied to {number} and read back ({applied}), but the 'applied' work note may "
+                        f"not have been written ({type(e).__name__}: {e}); check the journal before adding one.") from e
+    if noted.get("journal_unconfirmed") or noted.get("action") != "updated":
         return (f"Applied to {number} and read back: {applied}. The work note was accepted but could "
                 "not be confirmed in the journal (it may not be readable by this account); check "
                 "before adding another.")

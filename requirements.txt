@@ -9,6 +9,6 @@ pysnc==1.2.1
 # as a GitHub zip archive rather than git+https: pip downloads an archive over HTTPS, so installing
 # rio doesn't need Git on the laptop. To re-pin, replace the sha in both lines. No --hash pins
 # here: GitHub doesn't promise byte-stable archives, so the sha in the URL is the pin.
-now-mcp-config @ https://github.com/orwellsanimal/now-mcp/archive/46217a281589b9ffdf44ec9f0066a7ef183867d2.zip#subdirectory=now-config
-now-mcp-data @ https://github.com/orwellsanimal/now-mcp/archive/46217a281589b9ffdf44ec9f0066a7ef183867d2.zip#subdirectory=now-data
+now-mcp-config @ https://github.com/orwellsanimal/now-mcp/archive/4090a75dd0dfb6edc8b28b2d1086d37e6bbd7c1e.zip#subdirectory=now-config
+now-mcp-data @ https://github.com/orwellsanimal/now-mcp/archive/4090a75dd0dfb6edc8b28b2d1086d37e6bbd7c1e.zip#subdirectory=now-data
 pytest==9.0.2

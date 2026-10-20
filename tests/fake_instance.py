@@ -263,12 +263,19 @@ class FakeInstance:
             return {"confirmed": False, "action": "preview", "table": table, "sys_id": sys_id,
                     "changes": changes, "no_ops": sorted(set(known) - {c["field"] for c in changes}),
                     "unknown_fields": unknown}
+        if not known:                   # now-data 0.6.0 (now-mcp#18): nothing to write is refused
+            from now_data.query_check import QueryRefused
+            raise QueryRefused(f"nothing was written: {table} has no field {', '.join(unknown) or '(none given)'}")
         if self.fail_update is not None:
             raise self.fail_update
-        landed, not_applied, unconfirmed = [], [], []
+        landed, unconfirmed = [], []
+        # A field not on the record is not sent, and says why (now-mcp#18 review round 1)
+        not_applied = [{"field": f, "requested": values[f], "actual": None, "reason": "unknown_field"}
+                       for f in unknown]
         for f, v in known.items():
             if f in self.keep:
-                not_applied.append({"field": f, "requested": v, "actual": _parts(row.get(f))[0]})
+                not_applied.append({"field": f, "requested": v, "actual": _parts(row.get(f))[0],
+                                    "reason": "value_differs"})
             elif f in self.JOURNAL:
                 self.tables.setdefault("sys_journal_field", []).append(
                     {"sys_id": f"jn{len(self.calls):030d}", "element_id": sys_id, "element": f, "value": v,

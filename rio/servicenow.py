@@ -50,6 +50,26 @@ def record_number(number: Any) -> str:
     return text
 
 
+# ServiceNow evaluates a `javascript:` value in an encoded query on the server (servicenow-docs
+# api-reference/scripts/script-sandbox-environment.md). Text a caller typed must never put one there:
+# that is end-user script run under rio's account, the thing rio refuses to offer as now_run_script.
+_SCRIPT = re.compile(r"javascript\s*:", re.IGNORECASE)
+
+
+def query_safe(value: str, *, in_list: bool = False) -> bool:
+    """Whether instance or ticket text can go into an encoded query as a value as it is: no script
+    prefix, no caret (it ends the term), no line break, and for an IN list no comma (it splits the
+    value). PR #25 review: a short description of `javascript:gs.getUserName()// printer is down`
+    reached `nameIN` as its first sequence."""
+    return not (_SCRIPT.search(value) or "^" in value or "\n" in value or "\r" in value
+                or (in_list and "," in value))
+
+
+def chunks(items: list, size: int) -> list[list]:
+    """A list in pieces of at most `size`: an IN list of 500 sys_ids is 16 KB of URL (PR #25 review)."""
+    return [items[i:i + size] for i in range(0, len(items), size)]
+
+
 def rows(table: str, query: str, fields: tuple[str, ...], limit: int) -> list[dict]:
     """Records matching an encoded query, each field as {"value", "display"}.
 
@@ -97,7 +117,7 @@ JOURNAL_FETCH = 5           # rows read before picking the newest; see record_st
 _MARKUP = re.compile(r"\[/?code\]|<[^>]*>")
 # C0 and C1 controls, DEL included: ESC (\x1b) starts a terminal escape sequence, and the C1 CSI
 # (\x9b) does on some terminals. Tabs and newlines go too; the card is one fact per line.
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 # A lone surrogate (half of a pair cut by a max_length truncation) can't be encoded for the screen:
 # print() raises and rio would exit mid-conversation (PR #24 review).
 _SURROGATE = re.compile(r"[\ud800-\udfff]")
