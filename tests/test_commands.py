@@ -75,9 +75,9 @@ def test_a_refusal_is_said_and_kept_so_a_follow_up_has_context(instance):
     history = [{"role": "system", "content": "s"}]
     shown, _ = main.step("status INC9999999", history, None, CAPS, run=no_model)
     assert shown == ["rio> No status card for INC9999999: Tool error (sn_record_status): "
-                     "Record INC9999999 not found.\n"]
+                     "No task record numbered INC9999999.\n"]
     assert history[-1]["content"] == ("[sn_record_status INC9999999] No status card for INC9999999: "
-                                      "Tool error (sn_record_status): Record INC9999999 not found.")
+                                      "Tool error (sn_record_status): No task record numbered INC9999999.")
 
 
 def test_with_the_instance_off_the_command_says_why(monkeypatch):
@@ -89,7 +89,7 @@ def test_what_reaches_the_screen_has_no_control_characters():
     """The card cleans its own fields; this is the net under every other route: a model reply
     quoting a now_query result, a card's args, a tool error (PR #24 review)."""
     out = main.screen("rio> said \x1b[2Jhi\x9b31m \ud83d\nnext\ttab\r")
-    assert out == "rio> said  [2Jhi 31m �\nnext tab "
+    assert out == "rio> said  [2Jhi 31m \ufffd\nnext tab "
     out.encode("utf-8")                                              # no lone surrogate left
 
 
@@ -123,3 +123,18 @@ def test_a_number_typed_at_a_card_declines_it_and_shows_the_record(instance):
     assert shown[0] == "rio> Not done: nothing was changed.\n"
     assert shown[1].startswith("rio> INC0000059 · Incident")
     assert history[0]["content"].startswith("[now_update declined]")
+
+
+def test_main_prints_everything_through_screen(monkeypatch, capsys):
+    """PR #24 round 2: screen() being right proves nothing unless main() uses it, for the
+    banner's error text and every reply alike."""
+    monkeypatch.setattr(main, "capabilities", lambda: CAPS)
+    monkeypatch.setattr(main.now, "load", lambda: ["now-data tools: off (\x1b]0;owned\x07)"])
+    monkeypatch.setattr(main.sn, "load", lambda: ["record tools: \x9b2J"])
+    inputs = iter(["INC0000059", "/quit"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(inputs))
+    monkeypatch.setattr(main, "step", lambda text, history, card, caps: (["rio> \x1b[31mred \ud83d\n"], None))
+    assert main.main([]) == 0
+    out = capsys.readouterr().out
+    assert "now-data tools: off ( ]0;owned )" in out and "rio>  [31mred \ufffd" in out
+    assert not any(ord(ch) < 0x20 and ch != "\n" or 0x7f <= ord(ch) <= 0x9f for ch in out)

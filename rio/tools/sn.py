@@ -16,11 +16,11 @@ def load() -> list[str]:
 
     @register("sn_record_status", group="servicenow", writes=False)
     def sn_record_status(number: str) -> str:
-        """A compact status card for ANY ServiceNow task record by number (INC, CS, CHG, PRB, RITM, REQ, tasks).
+        """A status card for ANY ServiceNow task record by number (INC, CS, CHG, PRB, RITM, REQ, tasks). Reply with the card exactly as returned; do not reword it or drop its link.
 
         The card shows the number, type, state and priority, the short description, assignee and
-        group, the latest work note or comment, and a link. Reply with the card exactly as returned;
-        do not reword it or drop its link.
+        group, the latest work note or comment, and a link. Only this first paragraph reaches the
+        model's menu (rio.tools.schemas), so the instruction is there (PR #24 review).
 
         Args:
           number: record number, e.g. INC0000059 or CHG0000023

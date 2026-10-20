@@ -28,29 +28,44 @@ from rio.tools.errors import ToolError
 _REFUSALS = (ValueError, NotImplementedError, LookupError)
 
 
-def _pysnc_refusals() -> tuple[type[Exception], ...]:
-    """What PySNC raises for an answer the instance gave on purpose: a 403 (RoleException), a
-    401, an ACL'd query, a REST error. They subclass plain Exception, so without this a non-admin
-    account's 403 reads as a crash, and a caller that copes with a refusal (the status card without
-    its journal) can't (PR #24 review)."""
+def _pysnc_answers() -> tuple[tuple[type[Exception], ...], tuple[type[Exception], ...]]:
+    """(refusals, errors): what PySNC raises when the instance answered. A refusal is on purpose:
+    a 401, a 403 (RoleException), an ACL'd query, a missing record. An error is any other 4xx or a
+    5xx (RequestException, RestException, InstanceException), which may be rio's own bad request or
+    a proxy's page, so it isn't called a refusal (whitcortex ADR-0065's wording). They subclass plain
+    Exception, so without this a non-admin account's 403 reads as a crash, and a caller that copes
+    with a refusal (the status card without its journal) can't (PR #24 review)."""
     try:
         from pysnc import exceptions as x
     except ImportError:
-        return ()
-    return (x.AuthenticationException, x.AuthorizationException, x.RoleException,
-            x.AclQueryException, x.RestException, x.RequestException, x.NotFoundException,
-            x.InstanceException)
+        return (), ()
+    return ((x.AuthenticationException, x.AuthorizationException, x.RoleException,
+             x.AclQueryException, x.NotFoundException),
+            (x.RestException, x.RequestException, x.InstanceException))
+
+
+_ANSWER_CHARS = 300     # a proxy's HTML error page arrives whole as the message (measured: 5,057)
+
+
+def _answer(e: Exception) -> str:
+    # RestException carries (inner exception, "403 - {...}"); the text is its last argument.
+    text = str(e.args[-1]) if e.args else str(e)
+    text = " ".join(text.split())
+    return text if len(text) <= _ANSWER_CHARS else text[:_ANSWER_CHARS] + "…"
 
 
 def call_verb(fn, **kwargs) -> Any:
+    refusals, errors = _pysnc_answers()
     try:
         return fn(**kwargs)
     except _REFUSALS as e:
         raise ToolError(str(e)) from e
     except RuntimeError as e:  # now_data.client.ConfigError, now_config.loader.SnapshotNotFound
         raise ToolError(str(e)) from e
-    except _pysnc_refusals() as e:
-        raise ToolError(f"the instance refused it ({type(e).__name__}: {e})") from e
+    except refusals as e:
+        raise ToolError(f"the instance refused it ({type(e).__name__}: {_answer(e)})") from e
+    except errors as e:
+        raise ToolError(f"the instance answered with an error ({type(e).__name__}: {_answer(e)})") from e
 
 
 def _values(values: Any) -> dict:

@@ -28,7 +28,13 @@ _SURROGATE = re.compile(r"[\ud800-\udfff]")
 
 
 def screen(text: str) -> str:
-    return _SURROGATE.sub("�", _UNSAFE.sub(" ", text))
+    return _SURROGATE.sub("\ufffd", _UNSAFE.sub(" ", text))
+
+
+def show(*blocks: str) -> None:
+    """The one way rio prints: every block through screen(), the banner's error text included."""
+    for block in blocks:
+        print(screen(block))
 
 
 def _stats(replies) -> str:
@@ -40,20 +46,19 @@ def main(argv: list[str] | None = None) -> int:
     # not end the conversation and drop a waiting card (PR #24 review).
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(errors="replace")
-    print(f"rio · Ollama {config.OLLAMA_URL} · model {config.MODEL} · num_ctx {config.NUM_CTX}")
+    show(f"rio · Ollama {config.OLLAMA_URL} · model {config.MODEL} · num_ctx {config.NUM_CTX}")
     try:
         caps = capabilities()
     except (requests.RequestException, RuntimeError, ValueError) as e:
-        print(f"cannot start: {e}")
+        show(f"cannot start: {e}")
         return 1
-    print(f"capabilities: {', '.join(sorted(caps)) or '(none reported)'}")
+    show(f"capabilities: {', '.join(sorted(caps)) or '(none reported)'}")
     problem = config.sn_config_problem()
-    print(f"servicenow: {'configured for ' + config.sn_instance_url() if not problem else 'not configured: ' + problem}")
-    for note in now.load() + sn.load():
-        print(note)
+    show(f"servicenow: {'configured for ' + config.sn_instance_url() if not problem else 'not configured: ' + problem}")
+    show(*now.load(), *sn.load())
     if TOOLS and "tools" not in caps:
-        print(f"note: {config.MODEL} does not list 'tools', so the tools above are not offered to it")
-    print("type a message; /quit to leave\n")
+        show(f"note: {config.MODEL} does not list 'tools', so the tools above are not offered to it")
+    show("type a message; /quit to leave\n")
 
     history: list[dict] = [{"role": "system", "content": SYSTEM}]
     card: approval.Card | None = None
@@ -68,8 +73,7 @@ def main(argv: list[str] | None = None) -> int:
         if text in ("/quit", "/exit", "/q"):
             return 0
         shown, card = step(text, history, card, caps)
-        for block in shown:
-            print(screen(block))
+        show(*shown)
 
 
 def step(text: str, history: list[dict], card: approval.Card | None, caps: frozenset[str], *,

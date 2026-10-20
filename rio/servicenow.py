@@ -86,7 +86,7 @@ _SYS_ID = re.compile(r"[0-9a-f]{32}")
 def safe(value: str) -> str:
     """Any instance text for the terminal: control characters and lone surrogates gone, whitespace
     squashed. Nothing else changes: `<jane@example.com>` or `n < 5` in a short description is text."""
-    text = _SURROGATE.sub("�", _CONTROL.sub(" ", value or ""))
+    text = _SURROGATE.sub("\ufffd", _CONTROL.sub(" ", value or ""))
     return re.sub(r"\s+", " ", text).strip()
 
 
@@ -101,10 +101,13 @@ def record_status(number: str) -> dict:
     """The record's status fields as data, plus its newest work note or comment.
     An unknown number is a refusal, like every identifier miss (whitcortex #2113)."""
     number = record_number(number)
-    found = rows("task", f"number={number}", TASK_FIELDS, limit=1)
+    # Two rows, not one: nothing on the platform makes task.number unique (an import, a number
+    # counter reset after a clone), and a card that silently shows one of two is wrong half the time.
+    found = rows("task", f"number={number}", TASK_FIELDS, limit=2)
     if not found:
-        raise ToolError(f"Record {number} not found.")
+        raise ToolError(f"No task record numbered {number}.")
     rec = found[0]
+    rec["duplicate"] = len(found) > 1
     sys_id = rec["sys_id"]["value"]
     # sys_created_on has one-second resolution, and two entries in one second (a note and a comment
     # from one action) tie: the instance's order is then undefined. The newest is picked here, ties
@@ -158,4 +161,7 @@ def render_status_card(rec: dict) -> str:
         # "no entries" (whitcortex #2643).
         lines.append("No work notes or comments (none, or not readable by this account).")
     lines.append(rec["url"] or "(no link: the instance returned an unexpected table name or sys_id)")
+    if rec.get("duplicate"):
+        lines.append(f"Note: another task record is also numbered {rec['number']['value']}; this card "
+                     "shows the first the instance returned.")
     return "\n".join(lines)

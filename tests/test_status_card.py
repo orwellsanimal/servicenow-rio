@@ -99,7 +99,7 @@ def test_the_card_for_a_case_shows_its_comment_without_markup(inst):
 def test_one_read_on_task_with_values_and_display_then_the_journal(inst):
     card("INC0000059")
     task, = inst.queries("task")
-    assert task["query"] == "number=INC0000059" and task["limit"] == 1 and task["display_value"] == "all"
+    assert task["query"] == "number=INC0000059" and task["limit"] == 2 and task["display_value"] == "all"
     journal, = inst.queries("sys_journal_field")
     assert journal["query"] == (f"element_id={INC}^elementINwork_notes,comments"
                                 "^ORDERBYDESCsys_created_on")
@@ -161,6 +161,24 @@ def test_a_link_is_built_only_from_a_table_name_and_a_sys_id(inst):
     assert card("INC0000059").endswith("(no link: the instance returned an unexpected table name or sys_id)")
 
 
+def test_a_link_needs_a_32_hex_sys_id_too(inst):
+    for row in inst.tables["sys_journal_field"]:
+        if row["element_id"] == INC:
+            row["element_id"] = "INC-not-hex"
+    inst.tables["incident"][0]["sys_id"] = "INC-not-hex"
+    assert card("INC0000059").endswith("(no link: the instance returned an unexpected table name or sys_id)")
+
+
+def test_a_number_two_records_share_is_said_not_hidden(inst):
+    """Nothing makes task.number unique (an import, a counter reset after a clone)."""
+    inst.tables["problem"] = [{"sys_id": "f" * 32, "number": "INC0000059", "short_description": "dup",
+                               "state": ("1", "New"), "priority": ("4", "4 - Low")}]
+    text = card("INC0000059")
+    assert text.endswith("Note: another task record is also numbered INC0000059; this card shows the "
+                         "first the instance returned.")
+    assert "Note:" not in card("CHG0000023")
+
+
 def test_an_unreadable_journal_still_gives_a_card_and_says_so(inst):
     from now_data.query_check import FieldsUnreadable
     inst.refuse["sys_journal_field"] = FieldsUnreadable("could not read the fields of 'sys_journal_field' (HTTP 403)")
@@ -180,8 +198,22 @@ def test_a_403_on_the_journal_rows_still_gives_a_card(inst):
             "insufficient rights)") in text
 
 
+def test_another_http_error_is_an_error_not_a_refusal_and_is_cut_short(inst):
+    """PR #24 round 2: pysnc raises RequestException for any other 4xx or a 5xx with the whole body
+    as its message; a proxy's HTML page measured 5,057 characters. It may be rio's own bad request,
+    so it isn't called a refusal (whitcortex ADR-0065), and it doesn't flood the card."""
+    from pysnc.exceptions import RequestException, RestException
+    inst.refuse["sys_journal_field"] = RequestException("<html>" + "x" * 5000 + "</html>")
+    line = card("INC0000059").split("\n")[3]
+    assert line.startswith("Work notes and comments not read: the instance answered with an error "
+                           "(RequestException: <html>xxx")
+    assert line.endswith("…)") and len(line) < 420
+    inst.refuse["sys_journal_field"] = RestException({'error': 'no'}, 403)   # args: (self, "403 - …")
+    assert "(RestException: 403 - {'error': 'no'})" in card("INC0000059")
+
+
 def test_an_unknown_number_is_a_refusal(inst):
-    with pytest.raises(ToolError, match=r"^Record INC9999999 not found\.$"):
+    with pytest.raises(ToolError, match=r"^No task record numbered INC9999999\.$"):
         servicenow.record_status("INC9999999")
 
 
@@ -216,7 +248,9 @@ def test_it_is_offered_and_runs_when_rio_is_read_only(inst, monkeypatch):
     _now_data_on()
     sn.load()
     monkeypatch.setattr(config, "READ_ONLY", True)
-    assert "sn_record_status" in {s["function"]["name"] for s in schemas()}
+    menu = {s["function"]["name"]: s["function"]["description"] for s in schemas()}
+    # only a docstring's first paragraph reaches the menu (PR #24 round 2)
+    assert "Reply with the card exactly as returned; do not reword it or drop its link." in menu["sn_record_status"]
     assert execute_tool("sn_record_status", {"number": "INC0000059"}).startswith("INC0000059 · Incident")
     assert execute_tool("sn_record_status", {"number": "INC9999999"}) == \
-        "Tool error (sn_record_status): Record INC9999999 not found."
+        "Tool error (sn_record_status): No task record numbered INC9999999."

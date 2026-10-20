@@ -84,3 +84,27 @@ def test_display_falls_back_to_the_value_as_pysnc_does(inst):
     inst.tables["incident"][0]["assigned_to"] = ("u9", "")
     rec = inst.now_query("incident", "number=INC1", "assigned_to", display_value="all")["records"][0]
     assert rec["assigned_to"] == {"value": "u9", "display_value": "u9"}
+
+
+def test_every_negative_and_comparison_drops_empty_rows(inst):
+    """NULL matches no comparison on the instance (PR #24 round 2): "older than X" or "P1-P2"
+    must not pick up rows without the field."""
+    inst.tables["incident"].append({"sys_id": "5", "number": "INC5", "short_description": ""})
+    assert numbers(inst, "incident", "short_descriptionNOT LIKEvpn") == ["INC1", "INC3"]
+    assert numbers(inst, "incident", "priority<3") == ["INC1", "INC2", "INC3"]
+    assert numbers(inst, "incident", "sys_created_on<=2026-10-02 00:00:00") == ["INC1", "INC3"]
+
+
+def test_in_is_case_sensitive(inst):
+    assert numbers(inst, "incident", "numberINinc1,INC2") == ["INC2"]
+
+
+def test_order_by_a_number_is_numeric_and_by_a_reference_is_refused(inst):
+    assert numbers(inst, "incident", "ORDERBYDESCstate") == ["INC3", "INC2", "INC1"]   # 10 > 2 > 1
+    with pytest.raises(AssertionError, match="orders by 'assigned_to'"):
+        inst.now_query("incident", "ORDERBYassigned_to")
+
+
+def test_an_unknown_table_fails_the_test(inst):
+    with pytest.raises(AssertionError, match="no table 'incidnet'"):
+        inst.now_query("incidnet", "sys_id=1")

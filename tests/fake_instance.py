@@ -42,6 +42,7 @@ COLUMNS = {
              "assignment_group", "cmdb_ci", "active", "close_notes", "work_notes", "comments",
              "impact", "urgency", "opened_at"},
     "cmdb_ci": {"name", "operational_status", "install_status", "assigned_to", "short_description"},
+    "sys_journal_field": {"element_id", "element", "value", "name"},
 }
 
 
@@ -93,8 +94,21 @@ def _condition(term: str):
             return value.lower() in raw.lower()
         if op == "STARTSWITH":
             return raw.lower().startswith(value.lower())
-        return _compare(op, raw, value)
+        return raw != "" and _compare(op, raw, value)     # NULL compares with nothing
     return field, test
+
+
+def _sort_key(field: str, rows: list[dict]):
+    """How the instance orders by `field`, where that's known: a date or text by its stored value,
+    numbers as numbers. A reference or a choice (a value with its own display) orders by something
+    the fake can't know, so it fails the test instead of guessing (PR #24 review)."""
+    pairs = [_parts(r.get(field)) for r in rows]
+    if not field.endswith(("_on", "_at")) and any(v != d for v, d in pairs):
+        raise AssertionError(f"fake instance: doesn't know how the instance orders by {field!r} "
+                             "(a reference or choice field)")
+    if pairs and all(_NUMBER.fullmatch(v) for v, _ in pairs):
+        return lambda r: float(_parts(r.get(field))[0])
+    return lambda r: _parts(r.get(field))[0]
 
 
 def parse(query: str):
@@ -160,6 +174,8 @@ class FakeInstance:
     def _check(self, table: str, names) -> None:
         if table in self.refuse:
             raise self.refuse[table]
+        if not ({table} & (set(self.tables) | set(COLUMNS) | set(EXTENDS) | set(EXTENDS.values()))):
+            raise AssertionError(f"fake instance: no table {table!r} (declare it in the fixture)")
         from now_data.query_check import QueryRefused
         unknown = sorted(set(n for n in names if n) - self.columns(table))
         if unknown:
@@ -183,7 +199,7 @@ class FakeInstance:
         self._check(table, named + names)
         rows = [r for r in self._rows(table) if all(any(c(r) for c in ors) for ors in clauses)]
         for field, desc in reversed(order):
-            rows.sort(key=lambda r: _parts(r.get(field))[0], reverse=desc)
+            rows.sort(key=_sort_key(field, rows), reverse=desc)
         shown = [self._serialize(r, names, display_value) for r in rows[:limit]]
         return {"count": len(shown), "truncated": len(rows) > limit, "records": shown}
 
