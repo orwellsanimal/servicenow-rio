@@ -65,6 +65,12 @@ def query_safe(value: str, *, in_list: bool = False) -> bool:
                 or (in_list and "," in value))
 
 
+def is_sys_id(value: str) -> bool:
+    """A 32-hex sys_id, the only shape an instance reference may take into a query unchecked
+    (PR #25 review: the caller, the assignee and group ids came from the record, not from rio)."""
+    return bool(re.fullmatch(r"[0-9a-f]{32}", value or ""))
+
+
 def chunks(items: list, size: int) -> list[list]:
     """A list in pieces of at most `size`: an IN list of 500 sys_ids is 16 KB of URL (PR #25 review)."""
     return [items[i:i + size] for i in range(0, len(items), size)]
@@ -117,7 +123,7 @@ JOURNAL_FETCH = 5           # rows read before picking the newest; see record_st
 _MARKUP = re.compile(r"\[/?code\]|<[^>]*>")
 # C0 and C1 controls, DEL included: ESC (\x1b) starts a terminal escape sequence, and the C1 CSI
 # (\x9b) does on some terminals. Tabs and newlines go too; the card is one fact per line.
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
 # A lone surrogate (half of a pair cut by a max_length truncation) can't be encoded for the screen:
 # print() raises and rio would exit mid-conversation (PR #24 review).
 _SURROGATE = re.compile(r"[\ud800-\udfff]")

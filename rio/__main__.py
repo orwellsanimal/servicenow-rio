@@ -23,7 +23,7 @@ SYSTEM = ("You are rio, a ServiceNow engineering companion running locally. Answ
 _PLAIN_NO = re.compile(r"\s*(n|no)\s*[.!]?\s*$", re.IGNORECASE)
 # What reaches the screen, whatever its route: the card cleans its own fields, but instance text also
 # arrives inside the model's reply, a card's args and tool errors (PR #24 review). Newlines stay.
-_UNSAFE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+_UNSAFE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f\u061c\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]")
 _SURROGATE = re.compile(r"[\ud800-\udfff]")
 
 

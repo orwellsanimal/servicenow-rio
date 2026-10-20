@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import secrets
 from datetime import datetime
@@ -29,7 +30,8 @@ from datetime import datetime
 from now_data import verbs as data
 
 from rio import config, llm
-from rio.servicenow import chunks, incident_record, query_safe, record_number, rows, safe, ticket_text
+from rio.servicenow import (chunks, incident_record, is_sys_id, query_safe, record_number, rows, safe,
+                            ticket_text)
 from rio.tools.errors import ToolError
 from rio.tools.now import call_verb
 
@@ -42,6 +44,7 @@ MAX_GROUPS = 40             # groups offered, most used first: each is a 32-char
 CHOICE_LIMIT = 1000         # now_query's own cap; a list this long may be incomplete
 NAME_WORDS = 4              # the longest CI name looked for, in words
 NAME_CHUNK = 100            # names per `nameIN` query, to keep the URL short
+NAME_CHUNK_CHARS = 2000     # and characters: 100 long sequences of a pasted trace made 16.7 KB (PR #25)
 ID_CHUNK = 100              # sys_ids per IN list, likewise
 MAX_NAMES = 1000            # word sequences looked up at most (a pasted log would be thousands)
 CI_ROWS = 200               # rows read per `nameIN` query (one name can be many CIs)
@@ -99,6 +102,19 @@ def name_candidates(text: str) -> list[str]:
     return out
 
 
+def name_chunks(names: list[str]) -> list[list[str]]:
+    """The names in `nameIN` lists of at most NAME_CHUNK names and NAME_CHUNK_CHARS characters."""
+    out: list[list[str]] = []
+    size = 0
+    for name in names:
+        if not out or len(out[-1]) >= NAME_CHUNK or size + len(name) + 1 > NAME_CHUNK_CHARS:
+            out.append([])
+            size = 0
+        out[-1].append(name)
+        size += len(name) + 1
+    return out
+
+
 def ci_candidates(record: dict) -> tuple[list[dict], bool]:
     """The current CI, the caller's CIs, then CIs named in the ticket text; and whether the text had
     more word sequences than were looked up."""
@@ -113,12 +129,12 @@ def ci_candidates(record: dict) -> tuple[list[dict], bool]:
     if current["value"]:
         add(current["value"], current["display"], "already set on the incident")
     caller = record["caller_id"]["value"]
-    if caller:
+    if is_sys_id(caller):
         for r in rows("cmdb_ci", f"assigned_to={caller}^operational_status=1", ("sys_id", "name"), MAX_CIS):
             add(r["sys_id"]["value"], r["name"]["value"], "assigned to the caller")
     names = name_candidates(text)
     named = []
-    for chunk in chunks(names[:MAX_NAMES], NAME_CHUNK):
+    for chunk in name_chunks(names[:MAX_NAMES]):
         named += rows("cmdb_ci", f"operational_status=1^nameIN{','.join(chunk)}", ("sys_id", "name"), CI_ROWS)
     # `nameIN` matched a whole name under the instance's collation (case- and accent-insensitive on
     # MySQL-family instances); whitcortex's whole-word check against the text still decides.
@@ -129,9 +145,18 @@ def ci_candidates(record: dict) -> tuple[list[dict], bool]:
     return list(found.values()), len(names) > MAX_NAMES
 
 
-def group_candidates() -> list[dict]:
+def most_used(groups: list[dict], cap: int | None) -> list[dict]:
+    """At most `cap` groups, the most used, listed by name."""
+    kept = sorted(groups, key=lambda g: -g["uses"])[:cap] if cap else groups
+    return sorted(kept, key=lambda g: g["name"].lower())
+
+
+_DEFAULT_CAP = object()
+
+
+def group_candidates(cap=_DEFAULT_CAP) -> list[dict]:
     """Active, assignable groups WITH MEMBERS that incidents are actually assigned to, the most used
-    first, at most MAX_GROUPS.
+    first, at most `cap` (gather() caps after the assignee filter, PR #25 review).
 
     Measured on dev442835 (2026-10-10): 78 active groups, mostly approvers and Studio users;
     ServiceNow's `itil` type marks only 3 approval groups. What incidents really go to is the
@@ -141,7 +166,8 @@ def group_candidates() -> list[dict]:
     for r in rows("incident", "assignment_groupISNOTEMPTY^ORDERBYDESCsys_created_on",
                   ("assignment_group",), GROUP_HISTORY):    # "recent" means ordered (PR #2612 review)
         group = r["assignment_group"]["value"]
-        used[group] = used.get(group, 0) + 1
+        if is_sys_id(group):
+            used[group] = used.get(group, 0) + 1
     out = []
     for ids in chunks(list(used), ID_CHUNK):
         joined = ",".join(ids)
@@ -156,9 +182,8 @@ def group_candidates() -> list[dict]:
                 continue
             if int((members.get(sys_id) or {}).get("count") or 0) > 0:
                 out.append({"sys_id": sys_id, "name": g["name"]["value"], "why": "incidents are assigned here",
-                            "_uses": used[sys_id]})
-    out = sorted(out, key=lambda g: -g["_uses"])[:MAX_GROUPS]
-    return sorted(({k: v for k, v in g.items() if k != "_uses"} for g in out), key=lambda g: g["name"].lower())
+                            "uses": used.get(sys_id, 0)})
+    return most_used(out, MAX_GROUPS if cap is _DEFAULT_CAP else cap)     # MAX_GROUPS as it is when called
 
 
 def groups_the_assignee_is_in(groups: list[dict], assignee: str) -> list[dict]:
@@ -171,6 +196,8 @@ def groups_the_assignee_is_in(groups: list[dict], assignee: str) -> list[dict]:
     a group offered here passes the rule."""
     if not assignee or not groups:
         return groups
+    if not is_sys_id(assignee):         # not a reference rio can look up: no group is known to pass
+        return []
     mine: set[str] = set()
     for ids in chunks([g["sys_id"] for g in groups], ID_CHUNK):
         mine |= {r["group"]["value"] for r in rows("sys_user_grmember", f"user={assignee}^groupIN{','.join(ids)}",
@@ -179,14 +206,17 @@ def groups_the_assignee_is_in(groups: list[dict], assignee: str) -> list[dict]:
 
 
 def gather(record: dict) -> dict:
-    usable = group_candidates()
-    groups = groups_the_assignee_is_in(usable, record["assigned_to"]["value"])
+    # Filter by the assignee, THEN cap: capped first, an assignee whose one group is rarely used had
+    # it cut, and the note blamed them for being in no group (PR #25 review, round 2).
+    usable = group_candidates(cap=None)
+    filtered = groups_the_assignee_is_in(usable, record["assigned_to"]["value"])
+    groups = most_used(filtered, MAX_GROUPS)
     categories, categories_capped = category_pairs()
     cis, names_capped = ci_candidates(record)
     return {"categories": categories, "cis": cis, "groups": groups,
             # True only when the ASSIGNEE filter removed groups, so the note blames the assignee
             # only when that is the cause (whitcortex #2613).
-            "assignee_excluded_groups": len(groups) < len(usable),
+            "assignee_excluded_groups": len(filtered) < len(usable),
             "capped": [w for w, hit in (("category lists", categories_capped),
                                         ("CI names in the text", names_capped)) if hit]}
 
@@ -234,9 +264,10 @@ def classify(record: dict, candidates: dict, *, chat=None) -> dict:
     size = (sum(len(m["content"]) for m in messages) + len(json.dumps(schema))) // CHARS_PER_TOKEN
     budget = int(config.NUM_CTX * PROMPT_SHARE)
     if size > budget:
-        raise ToolError(f"the candidates are too many for num_ctx {config.NUM_CTX} (about {size} tokens "
-                        f"of prompt, {budget} allowed): {len(candidates['categories'])} category pairs, "
-                        f"{len(candidates['groups'])} groups. Raise NUM_CTX, or triage by hand")
+        raise ToolError(f"the prompt is too long for num_ctx {config.NUM_CTX} (about {size} tokens, "
+                        f"{budget} allowed): the ticket text is {len(ticket_text(record))} characters, with "
+                        f"{len(candidates['categories'])} category pairs and {len(candidates['groups'])} "
+                        "groups. Raise NUM_CTX, or triage by hand")
     reply = (chat or llm.chat)(messages, format=schema, think=False)
     if not reply.ok or not reply.content.strip():
         raise ToolError(f"the local model gave no usable reply ({reply.error or 'empty'})")
@@ -377,18 +408,37 @@ def save_proposal(record: dict, proposal: dict) -> dict:
              "created": datetime.now().isoformat(timespec="seconds")}
     path = _path(record["number"]["value"])
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(saved, indent=2), encoding="utf-8")
+    # Written whole or not at all: an interrupted write left an empty file that crashed every later
+    # `apply triage` (PR #25 review, round 2).
+    tmp = path.with_suffix(f".{secrets.token_hex(4)}.tmp")
+    tmp.write_text(json.dumps(saved, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
     return saved
 
 
 def load_proposal(number: str) -> dict | None:
+    """The saved proposal, None when there is none, or a refusal when the file can't be read."""
     path = _path(number)
-    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+    if not path.exists():
+        return None
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise ToolError(f"the saved triage proposal for {record_number(number)} can't be read ({e}); "
+                        f"run `triage {record_number(number)}` again") from e
+    if not isinstance(saved, dict):
+        raise ToolError(f"the saved triage proposal for {record_number(number)} is not a proposal; "
+                        f"run `triage {record_number(number)}` again")
+    return saved
 
 
 def pending_id(number: str) -> str:
-    """The id of the saved proposal, for the card the operator's command makes; "" when none."""
-    saved = load_proposal(number)
+    """The id of the saved proposal, for the card the operator's command makes; "" when none or
+    unreadable (the card's preview then says why)."""
+    try:
+        saved = load_proposal(number)
+    except ToolError:
+        return ""
     return str(saved.get("id") or "") if saved else ""
 
 
@@ -420,6 +470,8 @@ def _plan(number: str, proposal: str) -> tuple[dict, dict, dict]:
     saved = load_proposal(number)
     if saved is None:
         raise ToolError(f"no triage proposal for {number}; run `triage {number}` first")
+    if not saved.get("id"):             # saved before proposals had ids: it can't be bound to a card
+        raise ToolError(f"the saved triage proposal for {number} is from an older rio; run `triage {number}` again")
     if not proposal or proposal != saved.get("id"):
         raise ToolError(f"the triage proposal for {number} is not the one this card was made for; "
                         f"type `apply triage {number}` again")
@@ -437,6 +489,14 @@ def _plan(number: str, proposal: str) -> tuple[dict, dict, dict]:
     values = update_values(saved["proposal"])
     if not values:
         raise ToolError(f"nothing to apply on {number}: no field was proposed")
+    # The Table API doesn't enforce reference qualifiers: a group deactivated or a CI retired since the
+    # proposal would be written and read back as equal (PR #25 review, round 2). So ask again.
+    if "assignment_group" in values and not rows(
+            "sys_user_group", f"sys_id={values['assignment_group']}^active=true", ("sys_id",), 1):
+        raise ToolError(f"the proposed group is no longer active; run `triage {number}` again")
+    if "cmdb_ci" in values and not rows(
+            "cmdb_ci", f"sys_id={values['cmdb_ci']}^operational_status=1", ("sys_id",), 1):
+        raise ToolError(f"the proposed CI is no longer operational; run `triage {number}` again")
     return saved, record, values
 
 
@@ -469,9 +529,13 @@ def _missed(result: dict) -> str:
     """now-data 0.6.0's not_applied, in the operator's words, by reason."""
     why = {"unknown_field": "not a field this account can see; not sent",
            "unreadable_field": "not readable by this account; not sent"}
-    return "; ".join(f"{m['field']} ({why.get(m.get('reason'), '')})" if m.get("reason") in why else
-                     f"{m['field']} (asked {m['requested']!r}, the instance kept {m['actual']!r})"
-                     for m in result.get("not_applied") or [])
+    def one(m: dict) -> str:
+        if m.get("reason") in why:
+            return f"{m['field']} ({why[m['reason']]})"
+        if m.get("reason") in (None, "value_differs"):
+            return f"{m['field']} (asked {m['requested']!r}, the instance kept {m['actual']!r})"
+        return f"{m['field']} (not applied: {m.get('reason')})"   # a reason this rio doesn't know yet
+    return "; ".join(one(m) for m in result.get("not_applied") or [])
 
 
 def apply(number: str, proposal: str = "") -> str:
@@ -487,8 +551,10 @@ def apply(number: str, proposal: str = "") -> str:
     landed = sorted(result.get("changed_fields") or [])
     if result.get("action") != "updated":
         took = f"these took: {', '.join(landed)}; " if landed else "nothing took; "
+        # Something landed, so the record changed and the proposal can't apply again: say what to do.
+        then = (f"run `triage {number}` again for the rest" if landed else "the proposal is kept")
         raise ToolError(f"{number} was saved, but {took}these did not: {_missed(result) or 'unknown'}. "
-                        "No work note was added, and the proposal is kept.")
+                        f"No work note was added; {then}.")
     # The fields are applied and read back from here on; the proposal is spent (applied once).
     _path(number).unlink(missing_ok=True)
     applied = ", ".join(landed) or ", ".join(sorted(values))

@@ -79,7 +79,7 @@ def test_group_id_lists_are_chunked(inst, monkeypatch):
 
 def test_too_many_candidates_for_num_ctx_is_refused_before_the_model(inst, monkeypatch):
     monkeypatch.setattr(config, "NUM_CTX", 512)
-    with pytest.raises(ToolError, match="the candidates are too many for num_ctx 512"):
+    with pytest.raises(ToolError, match="the prompt is too long for num_ctx 512"):
         g.classify(_rec(), _cands(), chat=lambda *a, **k: pytest.fail("the model was called"))
 
 
@@ -167,7 +167,7 @@ def test_a_field_this_account_cannot_see_is_on_the_card_and_fails_the_apply(load
     assert "not written, not a field this account can read: cmdb_ci" in card.preview
     shown, _ = main.step("y", [], card, CAPS, run=_no_chat)
     assert "cmdb_ci (not a field this account can see; not sent)" in shown[0]
-    assert "No work note was added, and the proposal is kept." in shown[0]
+    assert "No work note was added; run `triage INC0000016` again for the rest." in shown[0]
 
 
 # ── Surviving mutations from the review ─────────────────────────────────────
@@ -230,7 +230,7 @@ def test_the_applied_note_says_applied_and_instance_text_cannot_add_lines(inst):
     proposal["assignment_group"]["label"] = "Net\n- CI: forged line"
     note = g.render_note("INC0000016", proposal, applied=True)
     assert "[applied]" in note and "[proposed]" not in note
-    assert "- CI: forged line" not in note.split("\n")
+    assert not any(line.startswith("- CI: forged") for line in note.split("\n"))
 
 
 def test_an_unknown_tool_error_does_not_name_operator_only_tools(loaded):
@@ -241,3 +241,105 @@ def test_an_unknown_tool_error_does_not_name_operator_only_tools(loaded):
 def test_read_only_is_said_before_operator_only(loaded, monkeypatch):
     monkeypatch.setattr(config, "READ_ONLY", True)
     assert "rio is read-only here" in approval.park("sn_triage_apply", {"number": "INC0000016"})
+
+
+# ── Round 2 of the review ───────────────────────────────────────────────────
+
+def test_the_assignee_filter_runs_before_the_cap(inst, monkeypatch):
+    """Capped first, an assignee whose one group is rarely used had it cut, and the note said they
+    were in no group (PR #25 review, round 2)."""
+    monkeypatch.setattr(g, "MAX_GROUPS", 1)
+    for n in (6, 7):                                                    # Network now outranks Hardware
+        inst.tables["incident"].append({"sys_id": f"h{n}", "number": f"INC000000{n}",
+                                        "assignment_group": (GRP_NET, "Network"), "sys_created_on": f"2026-10-0{n}"})
+    cands = g.gather(_rec(assigned_to="5" * 32))                         # Hal is only in Hardware
+    assert [x["name"] for x in cands["groups"]] == ["Hardware"] and cands["assignee_excluded_groups"]
+
+
+def test_a_corrupt_proposal_file_is_a_refusal_not_a_crash(loaded):
+    _proposed(loaded)
+    g._path("INC0000016").write_text("", encoding="utf-8")              # an interrupted save
+    shown, card = main.step("apply triage INC0000016", [], None, CAPS, run=_no_chat)
+    assert card is None and "the saved triage proposal for INC0000016 can't be read" in shown[0]
+
+
+def test_a_save_leaves_no_temporary_file(loaded):
+    _proposed(loaded)
+    assert [p.name for p in g._path("INC0000016").parent.iterdir()] == ["INC0000016.json"]
+
+
+def test_a_proposal_from_before_ids_says_to_triage_again(loaded):
+    _proposed(loaded)
+    saved = g.load_proposal("INC0000016")
+    del saved["id"]
+    g._path("INC0000016").write_text(json.dumps(saved), encoding="utf-8")
+    shown, card = main.step("apply triage INC0000016", [], None, CAPS, run=_no_chat)
+    assert card is None and "is from an older rio; run `triage INC0000016` again" in shown[0]
+
+
+def test_a_group_deactivated_since_the_proposal_is_refused_at_yes(loaded):
+    """The Table API doesn't enforce reference qualifiers, so the read-back can't catch this."""
+    _proposed(loaded)
+    _, card = main.step("apply triage INC0000016", [], None, CAPS, run=_no_chat)
+    next(x for x in loaded.tables["sys_user_group"] if x["sys_id"] == GRP_NET)["active"] = "false"
+    shown, _ = main.step("y", [], card, CAPS, run=_no_chat)
+    assert "the proposed group is no longer active" in shown[0] and loaded.writes() == []
+
+
+def test_a_ci_retired_since_the_proposal_is_refused_at_yes(loaded):
+    _proposed(loaded)
+    _, card = main.step("apply triage INC0000016", [], None, CAPS, run=_no_chat)
+    next(x for x in loaded.tables["cmdb_ci"] if x["sys_id"] == CI_DNS)["operational_status"] = "6"
+    shown, _ = main.step("y", [], card, CAPS, run=_no_chat)
+    assert "the proposed CI is no longer operational" in shown[0] and loaded.writes() == []
+
+
+def test_name_in_chunks_are_capped_by_size_too():
+    names = [f"{i:04d}" + "x" * 200 for i in range(40)]
+    out = g.name_chunks(names)
+    assert sum(len(c) for c in out) == 40 and all(len(",".join(c)) <= g.NAME_CHUNK_CHARS for c in out)
+    assert [len(c) for c in g.name_chunks([f"n{i:05d}" for i in range(250)])] == [100, 100, 50]
+
+
+def test_a_reference_that_is_not_a_sys_id_never_reaches_a_query(inst):
+    g.ci_candidates(_rec(caller_id="abc^ORactive=true", short_description="x", description=""))
+    assert not any("assigned_to=" in q["query"] for q in inst.queries("cmdb_ci"))
+    assert g.groups_the_assignee_is_in(g.group_candidates(), "abc^ORactive=true") == []
+
+
+@pytest.mark.parametrize("ch", ["\u061c", "\u200b", "\ufeff", "\u202e", "\u2066"])
+def test_invisible_and_direction_characters_are_stripped(ch):
+    from rio.__main__ import screen
+    from rio.servicenow import safe
+    assert ch not in safe(f"a{ch}b") and ch not in screen(f"a{ch}b")
+    assert "\u2028" not in screen("a\u2028b")
+
+
+def test_the_assignee_id_list_is_chunked(inst, monkeypatch):
+    monkeypatch.setattr(g, "ID_CHUNK", 1)
+    g.groups_the_assignee_is_in(g.group_candidates(cap=None), "5" * 32)
+    reads = [q for q in inst.queries("sys_user_grmember")]
+    assert len(reads) == 2 and all("," not in q["query"].split("groupIN")[1] for q in reads)
+
+
+def test_a_note_that_was_not_updated_is_said_as_unconfirmed(loaded, monkeypatch):
+    _proposed(loaded)
+    real = loaded.now_update
+
+    def note_not_updated(table, sys_id, values, confirmed=False):
+        out = real(table, sys_id, values, confirmed)
+        if confirmed and "work_notes" in values:
+            out = {**out, "action": "partially_applied"}
+        return out
+    from now_data import verbs
+    monkeypatch.setattr(verbs, "now_update", note_not_updated)
+    assert "could not be confirmed in the journal" in g.apply("INC0000016", g.pending_id("INC0000016"))
+
+
+def test_card_labels_are_one_safe_line(loaded):
+    _proposed(loaded)
+    saved = g.load_proposal("INC0000016")
+    saved["proposal"]["cmdb_ci"]["label"] = "dns01\n    assignment_group: forged"
+    g._path("INC0000016").write_text(json.dumps(saved), encoding="utf-8")
+    _, card = main.step("apply triage INC0000016", [], None, CAPS, run=_no_chat)
+    assert not any(line.strip().startswith("assignment_group: forged") for line in card.preview.split("\n"))

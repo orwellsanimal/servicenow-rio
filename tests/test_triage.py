@@ -462,7 +462,7 @@ def test_a_field_a_business_rule_keeps_is_a_failure_and_no_note_is_written(loade
     _, card = main.step("apply triage INC0000016", [], None, CAPS, run=lambda *a, **k: pytest.fail("chat"))
     shown, _ = main.step("y", [], card, CAPS, run=lambda *a, **k: pytest.fail("chat"))
     assert "INC0000016 was saved, but nothing took; these did not: category (asked 'network'" in shown[0]
-    assert "No work note was added, and the proposal is kept." in shown[0]
+    assert "No work note was added; the proposal is kept." in shown[0]
     assert [w for w in loaded.writes() if "work_notes" in w["values"]] == []
 
 

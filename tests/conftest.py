@@ -29,3 +29,14 @@ def no_sockets(monkeypatch):
     def refuse(self, request, **kw):
         pytest.fail(f"the test opened a connection: {request.method} {request.url}")
     monkeypatch.setattr(requests.Session, "send", refuse)
+
+
+@pytest.fixture(autouse=True)
+def no_raw_sockets(monkeypatch):
+    """The same for anything below requests: now-data's ensure_awake() opens its own urllib
+    connection and can wait 120 s (PR #25 review, round 2)."""
+    import socket
+
+    def refuse(self, address):
+        pytest.fail(f"the test opened a socket to {address}")
+    monkeypatch.setattr(socket.socket, "connect", refuse)
