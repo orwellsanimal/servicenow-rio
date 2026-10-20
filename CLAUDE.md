@@ -68,6 +68,9 @@ servicenow-coder and what is left behind; decisions are in [`docs/architecture/`
   serve both. No coded defaults: unset means not configured.
 - **The suite must not open a socket to Ollama or the instance.** Tests stub `requests.post` at
   the client's edge or the GlideRecord client; a test that wants the model is marked `live`.
+  The ServiceNow workflows (`rio/servicenow.py` and what builds on it) are tested against
+  `tests/fake_instance.py`, faked at the now-data verbs. It evaluates the encoded queries it is
+  sent and fails on one it can't read, so a test can't pass on a query the instance would widen.
 - **Carried code keeps its receipts.** A module copied from whitcortex keeps the issue numbers in
   its comments (`#2597`, `#2627`, `#2630`, `#2643`); they point at the measured evidence that
   shaped it. Trim the code, not the history.
