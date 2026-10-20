@@ -146,6 +146,9 @@ class FakeInstance:
         self.tables = {t: [dict(r) for r in rows] for t, rows in (tables or {}).items()}
         self.calls: list[tuple[str, dict]] = []
         self.refuse: dict[str, Exception] = {}      # table -> what now-data raises for it
+        self.keep: set[str] = set()                 # fields a business rule keeps (see now_update)
+        self.journal_hidden = False
+        self.fail_update: Exception | None = None   # what a confirmed now_update raises
 
     @staticmethod
     def _ancestors(table: str) -> list[str]:
@@ -213,6 +216,86 @@ class FakeInstance:
                 return self._serialize(r, names, display_value)
         raise ValueError(f"No {table} record with sys_id {sys_id!r}.")
 
+    def now_aggregate(self, table, query="", group_by="", count=True, display_value=True, **stats):
+        """COUNT only, grouped by one field or not, in now-data's shapes: {"count": n}, or
+        {group key: {"count": n}} keyed by the raw value when display_value is False."""
+        self.calls.append(("now_aggregate", {"table": table, "query": query, "group_by": group_by,
+                                             "display_value": display_value}))
+        if stats or not count or "," in group_by:
+            raise AssertionError("fake instance: only COUNT, by at most one field")
+        clauses, _, named = parse(query)
+        self._check(table, named + [group_by])
+        rows = [r for r in self._rows(table) if all(any(c(r) for c in ors) for ors in clauses)]
+        if not group_by:
+            return {"count": len(rows)}
+        out: dict = {}
+        for r in rows:
+            value, display = _parts(r.get(group_by))
+            key = (value if not display_value else display) or "(empty)"
+            out.setdefault(key, {"count": 0})["count"] += 1
+        return out
+
+    # ── Writes ──
+    # now_update in now-data's shape since now-mcp#3: the confirmed path reads every field back and
+    # says which landed. `keep` is a business rule: fields named there answer 200 and keep their old
+    # value. A journal field (work_notes, comments) adds a sys_journal_field row instead of being
+    # set; `journal_hidden` is an account that can't read those rows back.
+    JOURNAL = ("work_notes", "comments")
+
+    def _find(self, table, sys_id):
+        for t, rows in self.tables.items():
+            if table in self._ancestors(t):
+                for r in rows:
+                    if _parts(r.get("sys_id"))[0] == sys_id:
+                        return r
+        raise ValueError(f"No {table} record with sys_id {sys_id!r}.")
+
+    def now_update(self, table, sys_id, values, confirmed=False):
+        self.calls.append(("now_update", {"table": table, "sys_id": sys_id, "values": dict(values),
+                                          "confirmed": confirmed}))
+        self._check(table, [])          # unknown fields are reported below, not refused (now-data)
+        row = self._find(table, sys_id)
+        known = {f: v for f, v in values.items() if f in row or f in self.JOURNAL}
+        unknown = sorted(f for f in values if f not in known)
+        changes = [{"field": f, "current": _parts(row.get(f))[0], "proposed": v}
+                   for f, v in known.items() if f in self.JOURNAL or _parts(row.get(f))[0] != str(v)]
+        if not confirmed:
+            return {"confirmed": False, "action": "preview", "table": table, "sys_id": sys_id,
+                    "changes": changes, "no_ops": sorted(set(known) - {c["field"] for c in changes}),
+                    "unknown_fields": unknown}
+        if not known:                   # now-data 0.6.0 (now-mcp#18): nothing to write is refused
+            from now_data.query_check import QueryRefused
+            raise QueryRefused(f"nothing was written: {table} has no field {', '.join(unknown) or '(none given)'}")
+        if self.fail_update is not None:
+            raise self.fail_update
+        landed, unconfirmed = [], []
+        # A field not on the record is not sent, and says why (now-mcp#18 review round 1)
+        not_applied = [{"field": f, "requested": values[f], "actual": None, "reason": "unknown_field"}
+                       for f in unknown]
+        for f, v in known.items():
+            if f in self.keep:
+                not_applied.append({"field": f, "requested": v, "actual": _parts(row.get(f))[0],
+                                    "reason": "value_differs"})
+            elif f in self.JOURNAL:
+                self.tables.setdefault("sys_journal_field", []).append(
+                    {"sys_id": f"jn{len(self.calls):030d}", "element_id": sys_id, "element": f, "value": v,
+                     "sys_created_on": "2026-10-19 12:00:00", "sys_created_by": "rio"})
+                (unconfirmed if self.journal_hidden else landed).append(f)
+            else:
+                row[f] = (str(v), str(v))
+                landed.append(f)
+        if landed:
+            count = int(_parts(row.get("sys_mod_count"))[0] or 0) + 1
+            row["sys_mod_count"] = (str(count), str(count))
+        action = ("updated" if not not_applied else
+                  "partially_applied" if landed or unconfirmed else "not_applied")   # now-data 0.6.0
+        return {"confirmed": True, "action": action, "table": table, "sys_id": sys_id,
+                "changed_fields": landed, "not_applied": not_applied, "journal_unconfirmed": unconfirmed,
+                "no_ops": [], "unknown_fields": unknown}
+
+    def writes(self) -> list[dict]:
+        return [kw for verb, kw in self.calls if verb == "now_update" and kw["confirmed"]]
+
     def queries(self, table: str) -> list[dict]:
         return [kw for verb, kw in self.calls if verb == "now_query" and kw["table"] == table]
 
@@ -220,4 +303,6 @@ class FakeInstance:
         from now_data import verbs
         monkeypatch.setattr(verbs, "now_query", self.now_query)
         monkeypatch.setattr(verbs, "now_get", self.now_get)
+        monkeypatch.setattr(verbs, "now_aggregate", self.now_aggregate)
+        monkeypatch.setattr(verbs, "now_update", self.now_update)
         return self

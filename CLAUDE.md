@@ -71,6 +71,13 @@ servicenow-coder and what is left behind; decisions are in [`docs/architecture/`
   The ServiceNow workflows (`rio/servicenow.py` and what builds on it) are tested against
   `tests/fake_instance.py`, faked at the now-data verbs. It evaluates the encoded queries it is
   sent and fails on one it can't read, so a test can't pass on a query the instance would widen.
+- **Text into an encoded query only through `rio.servicenow.query_safe()`.** An encoded query has no
+  quoting: a caret ends the term (`^OR` widens it), a comma splits an IN list, and a `javascript:`
+  value is run on the instance. Ticket text, CI names and tag names are all typed by someone else
+  (PR #25 review: a short description could have put a script into `nameIN`). A record number goes
+  through `record_number()`; anything else that isn't a sys_id goes through `query_safe()`, or is
+  doubled (`^^`) when it must be looked up exactly. `tests/conftest.py` fails any test that opens a
+  connection, so a default argument bound to the real client shows up at once.
 - **Carried code keeps its receipts.** A module copied from whitcortex keeps the issue numbers in
   its comments (`#2597`, `#2627`, `#2630`, `#2643`); they point at the measured evidence that
   shaped it. Trim the code, not the history.

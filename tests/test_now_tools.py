@@ -136,6 +136,24 @@ def test_now_update_previews_dry_and_only_the_approved_card_confirms(fake_verbs,
     assert fake_verbs[-1] == ("now_update", {**args, "confirmed": True})
 
 
+def test_an_approved_write_that_did_not_fully_land_is_a_failure(fake_verbs, configured, monkeypatch):
+    """now-mcp#3 (now-data 0.6.0): the confirmed path reads back. A field a business rule kept
+    must not reach history as "approved and run" (rio#7 review, point 5)."""
+    now.load()
+
+    def update(**kw):
+        if not kw["confirmed"]:
+            return {"action": "preview", "changes": [{"field": "state", "current": "1", "proposed": "2"}]}
+        return {"confirmed": True, "action": "partially_applied", "changed_fields": ["urgency"],
+                "not_applied": [{"field": "state", "requested": "2", "actual": "1"}], "journal_unconfirmed": []}
+    monkeypatch.setattr(now_data_verbs, "now_update", update)
+    card = approval.park("now_update", {"table": "incident", "sys_id": "abc", "values": '{"state": "2", "urgency": "1"}'})
+    result = approval.answer(card, "y")
+    assert result == ("Tool error (now_update): saved, but not all of it took: state (asked '2', the instance "
+                      "kept '1'). Took: urgency. A business rule, data policy or ACL may have kept the rest.")
+    assert approval.outcome(result) == "approved, failed"
+
+
 def test_a_verb_refusal_reaches_the_model_as_a_tool_error(fake_verbs, configured):
     now.load()
     assert execute_tool("now_aggregate", {"table": "incident"}) == "Tool error (now_aggregate): needs GlideAggregate"

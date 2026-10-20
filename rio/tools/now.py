@@ -277,7 +277,17 @@ def _register_data() -> None:
           sys_id: the record's 32-character sys_id
           values: the fields to set, as a JSON object in a string, e.g. {"state": "2", "work_notes": "..."}
         """
-        return call_verb(data.now_update, table=table, sys_id=sys_id, values=_values(values), confirmed=True)
+        out = call_verb(data.now_update, table=table, sys_id=sys_id, values=_values(values), confirmed=True)
+        # now-data 0.6.0 reads every field back (now-mcp#3). A write that didn't fully land is a
+        # failure here, so the card's outcome says "approved, failed" and not "approved and run",
+        # which the model would read as done (rio#7 review, point 5).
+        if isinstance(out, dict) and out.get("action") not in (None, "updated"):
+            kept = "; ".join(f"{m.get('field')} (asked {m.get('requested')!r}, the instance kept "
+                             f"{m.get('actual')!r})" for m in out.get("not_applied") or [])
+            took = ", ".join(out.get("changed_fields") or []) or "nothing"
+            raise ToolError(f"saved, but not all of it took: {kept or 'see not_applied'}. Took: {took}. "
+                            "A business rule, data policy or ACL may have kept the rest.")
+        return out
 
 
 

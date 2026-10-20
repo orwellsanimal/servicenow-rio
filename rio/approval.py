@@ -39,13 +39,19 @@ class Card:
                 f"Run it? y = run exactly this, anything else = don't.")
 
 
-def park(tool: str, args: dict) -> Card | str:
-    """A card for this write, or the reason there is none (text for the model). Never runs the write."""
+def park(tool: str, args: dict, *, operator: bool = False) -> Card | str:
+    """A card for this write, or the reason there is none (text for the model). Never runs the write.
+
+    `operator=True` is passed only by an operator command (rio.commands): an operator_only tool,
+    such as applying a triage proposal, gets a card only from what the operator typed."""
     t = TOOLS.get(tool)
     if t is None or not t.writes:
         return f"Tool error: {tool!r} is not a write tool; nothing to approve."
-    if config.READ_ONLY:
+    if config.READ_ONLY:                # first: under it the operator's command is refused too
         return read_only_refusal(tool)
+    if t.operator_only and not operator:
+        return (f"Tool error ({tool}): only the operator can start this, by typing its command; "
+                "nothing was changed.")
     if not isinstance(args, dict):
         return f"Tool error ({tool}): arguments must be a JSON object, got {type(args).__name__}."
     try:

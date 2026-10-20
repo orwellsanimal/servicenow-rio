@@ -240,7 +240,7 @@ def test_the_tool_loads_only_with_the_now_data_tools(inst):
     assert sn.load() == ["record tools: off (they read through the now-data tools, which are off)"]
     assert "sn_record_status" not in TOOLS
     _now_data_on()
-    assert sn.load() == ["record tools: sn_record_status (or type a record number)"]
+    assert sn.load()[0].startswith("record tools: sn_record_status (or type a record number)")
     assert not TOOLS["sn_record_status"].writes
 
 

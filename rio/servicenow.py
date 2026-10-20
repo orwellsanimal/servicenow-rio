@@ -50,6 +50,32 @@ def record_number(number: Any) -> str:
     return text
 
 
+# ServiceNow evaluates a `javascript:` value in an encoded query on the server (servicenow-docs
+# api-reference/scripts/script-sandbox-environment.md). Text a caller typed must never put one there:
+# that is end-user script run under rio's account, the thing rio refuses to offer as now_run_script.
+_SCRIPT = re.compile(r"javascript\s*:", re.IGNORECASE)
+
+
+def query_safe(value: str, *, in_list: bool = False) -> bool:
+    """Whether instance or ticket text can go into an encoded query as a value as it is: no script
+    prefix, no caret (it ends the term), no line break, and for an IN list no comma (it splits the
+    value). PR #25 review: a short description of `javascript:gs.getUserName()// printer is down`
+    reached `nameIN` as its first sequence."""
+    return not (_SCRIPT.search(value) or "^" in value or "\n" in value or "\r" in value
+                or (in_list and "," in value))
+
+
+def is_sys_id(value: str) -> bool:
+    """A 32-hex sys_id, the only shape an instance reference may take into a query unchecked
+    (PR #25 review: the caller, the assignee and group ids came from the record, not from rio)."""
+    return bool(re.fullmatch(r"[0-9a-f]{32}", value or ""))
+
+
+def chunks(items: list, size: int) -> list[list]:
+    """A list in pieces of at most `size`: an IN list of 500 sys_ids is 16 KB of URL (PR #25 review)."""
+    return [items[i:i + size] for i in range(0, len(items), size)]
+
+
 def rows(table: str, query: str, fields: tuple[str, ...], limit: int) -> list[dict]:
     """Records matching an encoded query, each field as {"value", "display"}.
 
@@ -58,6 +84,28 @@ def rows(table: str, query: str, fields: tuple[str, ...], limit: int) -> list[di
     out = call_verb(data.now_query, table=table, query=query, fields=",".join(fields), limit=limit,
                     display_value="all")
     return [{f: _pair(r.get(f)) for f in fields} for r in out.get("records") or []]
+
+
+# The fields triage, enrichment and resolve read (whitcortex #2597's _TRIAGE_FIELDS, plus what
+# resolve needs). sys_mod_count is what lets `apply triage` refuse an incident changed since the
+# proposal.
+INCIDENT_FIELDS = ("sys_id", "number", "state", "short_description", "description", "category",
+                   "subcategory", "cmdb_ci", "assignment_group", "assigned_to", "caller_id",
+                   "close_code", "close_notes", "sys_mod_count")
+
+
+def incident_record(number: str) -> dict:
+    """The incident as data for code, not text for a model (whitcortex #2597): each field as
+    {"value", "display"}. An unknown number is a refusal (whitcortex #2113)."""
+    number = record_number(number)
+    found = rows("incident", f"number={number}", INCIDENT_FIELDS, limit=1)
+    if not found:
+        raise ToolError(f"Incident {number} not found.")
+    return found[0]
+
+
+def ticket_text(record: dict) -> str:
+    return f"{record['short_description']['value']}\n{record['description']['value']}"
 
 
 # ── Record status card (#2643) ───────────────────────────────────────────────
@@ -75,7 +123,7 @@ JOURNAL_FETCH = 5           # rows read before picking the newest; see record_st
 _MARKUP = re.compile(r"\[/?code\]|<[^>]*>")
 # C0 and C1 controls, DEL included: ESC (\x1b) starts a terminal escape sequence, and the C1 CSI
 # (\x9b) does on some terminals. Tabs and newlines go too; the card is one fact per line.
-_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u061c\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
 # A lone surrogate (half of a pair cut by a max_length truncation) can't be encoded for the screen:
 # print() raises and rio would exit mid-conversation (PR #24 review).
 _SURROGATE = re.compile(r"[\ud800-\udfff]")

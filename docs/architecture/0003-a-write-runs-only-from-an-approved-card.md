@@ -49,5 +49,9 @@ on the corporate instance rio must not change anything at all.
   fields that don't exist), so the operator approves a change, not a description of one.
 - **Negative:** a write that needs a lookup first (a number to a sys_id) takes two turns, because a
   turn has one tool round. That's measured in #3, along with the cost of a second round on the laptop.
-- **Open:** whether `apply triage <INC>` (#1, whitcortex ADR-0128) bypasses the card the way it does
-  in the lab, since the operator typing it is the approval.
+- **Resolved (operator, 2026-10-19, rio#1):** `apply triage <INC>` does **not** bypass the card. The
+  typed command parks a card that shows `now_update`'s real diff of the saved proposal, and only `y`
+  applies it. The card is one confirmation more than in the lab, and it shows the actual field changes
+  rather than the command's intent. The tool it runs is registered `operator_only=True`. That keeps it
+  off the menu, and `park()` refuses it unless an operator command asks (`operator=True`), so a model
+  that names it anyway gets no card (whitcortex #2614: the model called the old apply tool unasked).
