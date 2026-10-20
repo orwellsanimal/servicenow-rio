@@ -452,7 +452,8 @@ def run(number: str, *, chat=None) -> dict:
     _path(number).unlink(missing_ok=True)
     candidates = gather(record)
     proposal = validate(record, candidates, classify(record, candidates, chat=chat))
-    save_proposal(record, proposal)
+    if not config.READ_ONLY:            # it can never be applied there, so nothing is kept (as enrich)
+        save_proposal(record, proposal)
     return {"number": number, "proposal": proposal,
             "note": render_note(number, proposal, capped=candidates["capped"])}
 

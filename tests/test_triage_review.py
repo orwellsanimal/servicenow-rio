@@ -343,3 +343,9 @@ def test_card_labels_are_one_safe_line(loaded):
     g._path("INC0000016").write_text(json.dumps(saved), encoding="utf-8")
     _, card = main.step("apply triage INC0000016", [], None, CAPS, run=_no_chat)
     assert not any(line.strip().startswith("assignment_group: forged") for line in card.preview.split("\n"))
+
+
+def test_read_only_triage_keeps_no_proposal(inst, monkeypatch):
+    monkeypatch.setattr(config, "READ_ONLY", True)
+    g.run("INC0000016", chat=_model(_picks(category="network/dns")))
+    assert g.load_proposal("INC0000016") is None
