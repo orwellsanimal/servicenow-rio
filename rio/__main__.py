@@ -89,16 +89,16 @@ def step(text: str, history: list[dict], card: approval.Card | None, caps: froze
             return shown, None          # a yes ran the call; a plain no is just an answer
         # any other text drops the card and is also a new message
 
-    number = commands.status_number(text)
-    if number:                          # an operator command: no model turn (whitcortex #2643)
-        said = commands.status_card(number)
+    handled = commands.handle(text)
+    if handled is not None:             # an operator command: no model turn (whitcortex #2643)
+        label, said, new_card = handled
         shown.append(f"rio> {said}\n")
-        # Kept either way, so the next question can refer to it: a card, or why there was none
+        # Kept either way, so the next question can refer to it: the answer, or why there was none
         # (whitcortex kept both, PR #2616). Bracketed like a card's outcome, so a work note quoted in
         # it reads as the record's text, not as something rio said.
         history += [{"role": "user", "content": text},
-                    {"role": "assistant", "content": f"[sn_record_status {number}] {said}"}]
-        return shown, None
+                    {"role": "assistant", "content": f"[{label}] {said}"}]
+        return shown, new_card
 
     before = len(history)
     history.append({"role": "user", "content": text})

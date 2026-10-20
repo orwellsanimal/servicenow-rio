@@ -60,6 +60,28 @@ def rows(table: str, query: str, fields: tuple[str, ...], limit: int) -> list[di
     return [{f: _pair(r.get(f)) for f in fields} for r in out.get("records") or []]
 
 
+# The fields triage, enrichment and resolve read (whitcortex #2597's _TRIAGE_FIELDS, plus what
+# resolve needs). sys_mod_count is what lets `apply triage` refuse an incident changed since the
+# proposal.
+INCIDENT_FIELDS = ("sys_id", "number", "state", "short_description", "description", "category",
+                   "subcategory", "cmdb_ci", "assignment_group", "assigned_to", "caller_id",
+                   "close_code", "close_notes", "sys_mod_count")
+
+
+def incident_record(number: str) -> dict:
+    """The incident as data for code, not text for a model (whitcortex #2597): each field as
+    {"value", "display"}. An unknown number is a refusal (whitcortex #2113)."""
+    number = record_number(number)
+    found = rows("incident", f"number={number}", INCIDENT_FIELDS, limit=1)
+    if not found:
+        raise ToolError(f"Incident {number} not found.")
+    return found[0]
+
+
+def ticket_text(record: dict) -> str:
+    return f"{record['short_description']['value']}\n{record['description']['value']}"
+
+
 # ── Record status card (#2643) ───────────────────────────────────────────────
 #
 # One read on the parent `task` table resolves any record number on the instance (measured

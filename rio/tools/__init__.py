@@ -31,6 +31,9 @@ class Tool:
     # For a write: shows what the call WOULD do, without doing it, for the approval card. It raises
     # ToolError when the call cannot work (a missing record), so nothing is parked for it.
     preview: Callable[..., str] | None = None
+    # Not on the menu, and the model can't park it: only an operator command makes its card.
+    # whitcortex #2614: the model called the old triage-apply tool unasked, right after a dry run.
+    operator_only: bool = False
 
 
 TOOLS: dict[str, Tool] = {}
@@ -40,7 +43,8 @@ TOOLS: dict[str, Tool] = {}
 MAX_RESULT_CHARS = 6000
 
 
-def register(name: str, *, group: str, writes: bool, preview: Callable[..., str] | None = None):
+def register(name: str, *, group: str, writes: bool, preview: Callable[..., str] | None = None,
+             operator_only: bool = False):
     """Add a tool. `writes` has no default on purpose: every tool says whether it changes anything,
     so a new write cannot arrive ungated by omission (ADR-0003)."""
     def decorator(fn):
@@ -50,7 +54,9 @@ def register(name: str, *, group: str, writes: bool, preview: Callable[..., str]
                              f"{prior.fn.__module__}.{prior.fn.__qualname__}; rename one (whitcortex #1963).")
         if writes and preview is None:
             raise ValueError(f"write tool {name!r} needs a preview for its approval card.")
-        TOOLS[name] = Tool(name, fn, group, writes, preview)
+        if operator_only and not writes:
+            raise ValueError(f"{name!r}: operator_only is for writes; a read the model can't call needs no tool.")
+        TOOLS[name] = Tool(name, fn, group, writes, preview, operator_only)
         return fn
     return decorator
 
@@ -90,7 +96,7 @@ def schemas() -> list[dict]:
     """The tools in Ollama's function-calling shape. A write is not on the menu when rio is read-only."""
     out = []
     for tool in TOOLS.values():
-        if tool.writes and config.READ_ONLY:
+        if tool.operator_only or (tool.writes and config.READ_ONLY):
             continue
         doc = inspect.getdoc(tool.fn) or ""
         arg_docs = _arg_docs(doc)

@@ -97,8 +97,13 @@ files; the others (properties, roles, catalog) are skipped if your user can't re
   record's card itself, with no model turn: type, state, priority, short description, assignee
   and group, the latest work note or comment, and the link. It works for any task record (INC,
   CHG, CS, PRB, RITM, REQ, tasks). The model can ask for one too, with `sn_record_status`.
+- **Triage:** type `triage INC0010023` (or ask) for a dry run. It proposes the incident's category,
+  CI and assignment group from values the instance offers, each backed by a quote from the ticket
+  or reported as *not established*, and changes nothing. `apply triage INC0010023` then shows a card
+  with the real diff of that saved proposal, and `y` applies it, if the incident hasn't changed
+  since. The model can propose a triage but can't apply one.
 - **Writes:** a write waits on an approval card that shows its real dry-run diff, and only `y` runs it ([ADR-0003](docs/architecture/0003-a-write-runs-only-from-an-approved-card.md)). With `RIO_READ_ONLY=true` there are no writes at all.
-- **Next:** the triage / enrich / resolve graphs (#1), then the Fluent SDK pipeline.
+- **Next:** the enrich and resolve graphs (#1), then the Fluent SDK pipeline.
 
 ## Conventions
 

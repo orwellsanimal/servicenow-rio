@@ -30,6 +30,10 @@ READ_ONLY: bool = os.getenv("RIO_READ_ONLY", "").strip().lower() in ("1", "true"
 # of THIS instance. Unset: the now-config tools are not offered.
 INSTANCE_CONFIG_ROOT: str = os.getenv("INSTANCE_CONFIG_ROOT", "").strip()
 
+# What rio keeps between runs on this machine: a triage proposal waiting for `apply triage`. It holds
+# ticket text (the evidence quotes), so it stays local and is gitignored, like the snapshot.
+STATE_DIR: Path = Path(os.getenv("RIO_STATE_DIR", "").strip() or ROOT / "state").expanduser()
+
 # ── ServiceNow identity ──────────────────────────────────────────────────────
 SN_INSTANCE: str = os.getenv("SN_INSTANCE", "").strip()
 SN_IDENTITY: str = os.getenv("SN_IDENTITY", "").strip().lower() or "human"
