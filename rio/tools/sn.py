@@ -19,7 +19,8 @@ def load() -> list[str]:
         """A compact status card for ANY ServiceNow task record by number (INC, CS, CHG, PRB, RITM, REQ, tasks).
 
         The card shows the number, type, state and priority, the short description, assignee and
-        group, the latest work note or comment, and a link. Reply with the card as returned.
+        group, the latest work note or comment, and a link. Reply with the card exactly as returned;
+        do not reword it or drop its link.
 
         Args:
           number: record number, e.g. INC0000059 or CHG0000023

@@ -64,21 +64,33 @@ def test_a_bare_number_is_the_card_with_no_model_turn(instance):
     shown, card = main.step("INC0000059", history, None, CAPS, run=no_model)
     assert card is None
     assert shown[0].startswith("rio> INC0000059 · Incident · New")
+    card_text = shown[0][len("rio> "):].rstrip("\n")
+    # bracketed: a work note quoted in the card is the record's text, not something rio said
     assert history[1:] == [{"role": "user", "content": "INC0000059"},
-                           {"role": "assistant", "content": shown[0][len("rio> "):].rstrip("\n")}]
+                           {"role": "assistant", "content": f"[sn_record_status INC0000059] {card_text}"}]
 
 
-def test_a_refusal_is_said_and_not_kept(instance):
+def test_a_refusal_is_said_and_kept_so_a_follow_up_has_context(instance):
+    """whitcortex kept both rows (PR #2616): "why not?" after a refusal needs the refusal."""
     history = [{"role": "system", "content": "s"}]
     shown, _ = main.step("status INC9999999", history, None, CAPS, run=no_model)
     assert shown == ["rio> No status card for INC9999999: Tool error (sn_record_status): "
                      "Record INC9999999 not found.\n"]
-    assert len(history) == 1
+    assert history[-1]["content"] == ("[sn_record_status INC9999999] No status card for INC9999999: "
+                                      "Tool error (sn_record_status): Record INC9999999 not found.")
 
 
 def test_with_the_instance_off_the_command_says_why(monkeypatch):
     shown, _ = main.step("INC0000059", [], None, CAPS, run=no_model)
-    assert shown[0].startswith("rio> No status card for INC0000059: Tool error: unknown tool 'sn_record_status'")
+    assert shown == ["rio> No status card for INC0000059: the record tools are off (see the startup banner).\n"]
+
+
+def test_what_reaches_the_screen_has_no_control_characters():
+    """The card cleans its own fields; this is the net under every other route: a model reply
+    quoting a now_query result, a card's args, a tool error (PR #24 review)."""
+    out = main.screen("rio> said \x1b[2Jhi\x9b31m \ud83d\nnext\ttab\r")
+    assert out == "rio> said  [2Jhi 31m �\nnext tab "
+    out.encode("utf-8")                                              # no lone surrogate left
 
 
 def test_a_sentence_goes_to_the_model(instance):

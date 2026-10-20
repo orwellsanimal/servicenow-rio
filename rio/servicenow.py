@@ -76,13 +76,25 @@ _MARKUP = re.compile(r"\[/?code\]|<[^>]*>")
 # C0 and C1 controls, DEL included: ESC (\x1b) starts a terminal escape sequence, and the C1 CSI
 # (\x9b) does on some terminals. Tabs and newlines go too; the card is one fact per line.
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+# A lone surrogate (half of a pair cut by a max_length truncation) can't be encoded for the screen:
+# print() raises and rio would exit mid-conversation (PR #24 review).
+_SURROGATE = re.compile(r"[\ud800-\udfff]")
+_TABLE = re.compile(r"[a-z][a-z0-9_]*")
+_SYS_ID = re.compile(r"[0-9a-f]{32}")
+
+
+def safe(value: str) -> str:
+    """Any instance text for the terminal: control characters and lone surrogates gone, whitespace
+    squashed. Nothing else changes: `<jane@example.com>` or `n < 5` in a short description is text."""
+    text = _SURROGATE.sub("�", _CONTROL.sub(" ", value or ""))
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def plain(value: str) -> str:
-    """Instance text for the terminal: markup and control characters gone, whitespace squashed.
-    Case comments arrive as [code]<p>…</p>[/code] (measured on dev442835, whitcortex #2643)."""
-    text = html.unescape(_MARKUP.sub(" ", value or ""))
-    return re.sub(r"\s+", " ", _CONTROL.sub(" ", text)).strip()
+    """A journal entry for the terminal: its markup gone, then safe(). Case comments arrive as
+    [code]<p>…</p>[/code] (measured on dev442835, whitcortex #2643). Only journal text is HTML;
+    whitcortex stripped markup from it alone, and so does rio."""
+    return safe(html.unescape(_MARKUP.sub(" ", value or "")))
 
 
 def record_status(number: str) -> dict:
@@ -114,7 +126,10 @@ def record_status(number: str) -> dict:
             "by": newest["sys_created_by"]["value"],
             "when": newest["sys_created_on"]["display"] or newest["sys_created_on"]["value"]}
         rec["journal_error"] = ""
-    rec["url"] = f"{config.sn_instance_url()}/{rec['sys_class_name']['value']}.do?sys_id={sys_id}"
+    table = rec["sys_class_name"]["value"]
+    # Both come from the instance; a link is built only from what a table name and a sys_id can be.
+    rec["url"] = (f"{config.sn_instance_url()}/{table}.do?sys_id={sys_id}"
+                  if _TABLE.fullmatch(table) and _SYS_ID.fullmatch(sys_id) else "")
     return rec
 
 
@@ -126,21 +141,21 @@ def render_status_card(rec: dict) -> str:
             rec["state"]["display"] or rec["state"]["value"] or "no state"]
     if rec["priority"]["display"]:
         head.append(rec["priority"]["display"])
-    lines = [" · ".join(plain(h) for h in head),
-             plain(rec["short_description"]["value"]) or "(no short description)",
-             f"Assigned: {plain(rec['assigned_to']['display']) or 'unassigned'} · "
-             f"Group: {plain(rec['assignment_group']['display']) or 'none'}"]
+    lines = [" · ".join(safe(h) for h in head),
+             safe(rec["short_description"]["value"]) or "(no short description)",
+             f"Assigned: {safe(rec['assigned_to']['display']) or 'unassigned'} · "
+             f"Group: {safe(rec['assignment_group']['display']) or 'none'}"]
     last = rec["last_entry"]
     if last:
         label = "Last work note" if last["kind"] == "work_notes" else "Last comment"
         text = last["text"][:LAST_ENTRY_CHARS] + ("…" if len(last["text"]) > LAST_ENTRY_CHARS else "")
-        lines.append(f"{label} ({plain(last['by']) or 'unknown'}, {plain(last['when']) or 'no time'}): "
+        lines.append(f"{label} ({safe(last['by']) or 'unknown'}, {safe(last['when']) or 'no time'}): "
                      f"{text or '(empty)'}")
     elif rec.get("journal_error"):
-        lines.append(f"Work notes and comments not read: {plain(rec['journal_error'])}")
+        lines.append(f"Work notes and comments not read: {safe(rec['journal_error'])}")
     else:
         # An account that can't read the journal's rows gets none, which can't be told from
         # "no entries" (whitcortex #2643).
         lines.append("No work notes or comments (none, or not readable by this account).")
-    lines.append(rec["url"])
+    lines.append(rec["url"] or "(no link: the instance returned an unexpected table name or sys_id)")
     return "\n".join(lines)

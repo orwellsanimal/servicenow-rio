@@ -21,6 +21,14 @@ SYSTEM = ("You are rio, a ServiceNow engineering companion running locally. Answ
           "on a card, so propose it with the tool and let the card ask.")
 
 _PLAIN_NO = re.compile(r"\s*(n|no)\s*[.!]?\s*$", re.IGNORECASE)
+# What reaches the screen, whatever its route: the card cleans its own fields, but instance text also
+# arrives inside the model's reply, a card's args and tool errors (PR #24 review). Newlines stay.
+_UNSAFE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f-\x9f]")
+_SURROGATE = re.compile(r"[\ud800-\udfff]")
+
+
+def screen(text: str) -> str:
+    return _SURROGATE.sub("�", _UNSAFE.sub(" ", text))
 
 
 def _stats(replies) -> str:
@@ -28,6 +36,10 @@ def _stats(replies) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # A character the console can't encode (an emoji with stdout redirected to a cp1252 file) must
+    # not end the conversation and drop a waiting card (PR #24 review).
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")
     print(f"rio · Ollama {config.OLLAMA_URL} · model {config.MODEL} · num_ctx {config.NUM_CTX}")
     try:
         caps = capabilities()
@@ -57,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         shown, card = step(text, history, card, caps)
         for block in shown:
-            print(block)
+            print(screen(block))
 
 
 def step(text: str, history: list[dict], card: approval.Card | None, caps: frozenset[str], *,
@@ -75,10 +87,13 @@ def step(text: str, history: list[dict], card: approval.Card | None, caps: froze
 
     number = commands.status_number(text)
     if number:                          # an operator command: no model turn (whitcortex #2643)
-        ok, card_text = commands.status_card(number)
-        shown.append(f"rio> {card_text}\n")
-        if ok:                          # kept, so the next question can refer to it
-            history += [{"role": "user", "content": text}, {"role": "assistant", "content": card_text}]
+        said = commands.status_card(number)
+        shown.append(f"rio> {said}\n")
+        # Kept either way, so the next question can refer to it: a card, or why there was none
+        # (whitcortex kept both, PR #2616). Bracketed like a card's outcome, so a work note quoted in
+        # it reads as the record's text, not as something rio said.
+        history += [{"role": "user", "content": text},
+                    {"role": "assistant", "content": f"[sn_record_status {number}] {said}"}]
         return shown, None
 
     before = len(history)

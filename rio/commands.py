@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 
-from rio.tools import execute_tool
+from rio.tools import TOOLS, execute_tool
 
 _STATUS_COMMAND = re.compile(
     r"^\s*(?:(?:sn\s+)?status\s+(?:of\s+|for\s+)?)?([A-Za-z]{2,10}\d{5,})\s*[.!?]?\s*$",
@@ -26,10 +26,12 @@ def status_number(text: str) -> str | None:
     return m.group(1).upper() if m else None
 
 
-def status_card(number: str) -> tuple[bool, str]:
-    """(ok, what to show). Runs through execute_tool, the one dispatcher, so a missing tool (the
-    instance is off) and a refusal (no such record) both come back as text."""
+def status_card(number: str) -> str:
+    """The card, or why there is none. Runs through execute_tool, the one dispatcher, so a refusal
+    (no such record) comes back as text like any tool's."""
+    if "sn_record_status" not in TOOLS:
+        return f"No status card for {number}: the record tools are off (see the startup banner)."
     result = execute_tool("sn_record_status", {"number": number})
     if result.startswith("Tool error"):
-        return False, f"No status card for {number}: {result}"
-    return True, result
+        return f"No status card for {number}: {result}"
+    return result

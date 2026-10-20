@@ -28,6 +28,20 @@ from rio.tools.errors import ToolError
 _REFUSALS = (ValueError, NotImplementedError, LookupError)
 
 
+def _pysnc_refusals() -> tuple[type[Exception], ...]:
+    """What PySNC raises for an answer the instance gave on purpose: a 403 (RoleException), a
+    401, an ACL'd query, a REST error. They subclass plain Exception, so without this a non-admin
+    account's 403 reads as a crash, and a caller that copes with a refusal (the status card without
+    its journal) can't (PR #24 review)."""
+    try:
+        from pysnc import exceptions as x
+    except ImportError:
+        return ()
+    return (x.AuthenticationException, x.AuthorizationException, x.RoleException,
+            x.AclQueryException, x.RestException, x.RequestException, x.NotFoundException,
+            x.InstanceException)
+
+
 def call_verb(fn, **kwargs) -> Any:
     try:
         return fn(**kwargs)
@@ -35,6 +49,8 @@ def call_verb(fn, **kwargs) -> Any:
         raise ToolError(str(e)) from e
     except RuntimeError as e:  # now_data.client.ConfigError, now_config.loader.SnapshotNotFound
         raise ToolError(str(e)) from e
+    except _pysnc_refusals() as e:
+        raise ToolError(f"the instance refused it ({type(e).__name__}: {e})") from e
 
 
 def _values(values: Any) -> dict:
