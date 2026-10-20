@@ -152,6 +152,16 @@ def test_an_unknown_number_is_a_refusal(inst):
         servicenow.record_status("INC9999999")
 
 
+@pytest.mark.parametrize("number", ["INC0000059^ORactive=true", "INC0000059^NQactive=true",
+                                    "number=INC0000059", "INC0000059,CHG0000023", "", "   ", None])
+def test_a_number_that_would_change_the_query_is_refused_before_any_read(inst, number):
+    """The model supplies the number, and it is pasted into `number=<it>`: a caret would widen the
+    read and the first row would be shown as this record."""
+    with pytest.raises(ToolError, match="is not a record number"):
+        servicenow.record_status(number)
+    assert inst.calls == []
+
+
 # ── The tool ────────────────────────────────────────────────────────────────
 
 def _now_data_on():

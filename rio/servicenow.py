@@ -33,6 +33,23 @@ def _pair(raw: Any) -> dict:
     return {"value": text, "display": text}
 
 
+_NUMBER = re.compile(r"[A-Za-z]{2,10}\d{5,}")
+
+
+def record_number(number: Any) -> str:
+    """A record number fit to go into an encoded query, upper-cased, or a refusal.
+
+    The model supplies it, and it goes into `number=<it>` as text: `INC0010001^ORactive=true` would
+    widen the read to every active record and the first row would be shown as the answer (an
+    encoded query has no quoting; servicenow-coder lessons: "invalid encoded query returns all
+    rows"). whitcortex's add_query had the same exposure; rio refuses anything but letters then
+    digits, the shape the bare-number command accepts."""
+    text = str(number or "").strip().upper()
+    if not _NUMBER.fullmatch(text):
+        raise ToolError(f"{number!r} is not a record number: expected letters then digits, e.g. INC0010023.")
+    return text
+
+
 def rows(table: str, query: str, fields: tuple[str, ...], limit: int) -> list[dict]:
     """Records matching an encoded query, each field as {"value", "display"}.
 
@@ -71,7 +88,7 @@ def plain(value: str) -> str:
 def record_status(number: str) -> dict:
     """The record's status fields as data, plus its newest work note or comment.
     An unknown number is a refusal, like every identifier miss (whitcortex #2113)."""
-    number = number.strip().upper()
+    number = record_number(number)
     found = rows("task", f"number={number}", TASK_FIELDS, limit=1)
     if not found:
         raise ToolError(f"Record {number} not found.")
