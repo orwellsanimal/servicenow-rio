@@ -1,0 +1,10 @@
+[submodule "servicenow-sdk-examples"]
+	path = servicenow-sdk-examples
+	url = https://github.com/ServiceNow/sdk-examples.git
+	branch = main
+	shallow = true
+[submodule "servicenow-docs"]
+	path = servicenow-docs
+	url = https://github.com/ServiceNow/ServiceNowDocs.git
+	branch = brazil
+	shallow = true

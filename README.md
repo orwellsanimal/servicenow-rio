@@ -37,7 +37,8 @@ rules ([ADR-0002](docs/architecture/0002-local-only-inference-sized-to-the-cpu.m
 
 **Check the prerequisites first.** Rio needs Python 3.12 (64-bit) and Ollama with a model pulled.
 It doesn't need Git to install or run: pip fetches the now-mcp packages as zip archives from
-GitHub (Git only matters for cloning or contributing). In PowerShell:
+GitHub. Git matters for cloning, contributing, and fetching the documentation the reference tools
+read (below); without it rio runs with those tools off. In PowerShell:
 
 ```powershell
 py -3.12 --version   # Python 3.12.x. "py is not recognized": Python, or its py launcher, isn't installed
@@ -86,6 +87,49 @@ Rio refuses a snapshot taken from a different instance than `SN_INSTANCE`, and o
 place (no `instance.json`, which an interrupted re-export leaves behind). It needs only the schema
 files; the others (properties, roles, catalog) are skipped if your user can't read them.
 
+**The reference tools.** `docs_search`, `examples_search` and `reference_read` answer from two
+repositories ServiceNow publishes, held here as shallow submodules
+([ADR-0004](docs/architecture/0004-reference-material-as-submodules-found-by-an-index.md)):
+
+| Folder | Repository | Branch | What |
+|---|---|---|---|
+| `servicenow-docs` | [ServiceNow/ServiceNowDocs](https://github.com/ServiceNow/ServiceNowDocs) | `brazil` | the product documentation as markdown: 52,774 pages, about 600 MB on disk |
+| `servicenow-sdk-examples` | [ServiceNow/sdk-examples](https://github.com/ServiceNow/sdk-examples) | `main` | the Fluent SDK samples, 26 of them |
+
+A plain `git clone` leaves both folders empty. Fill them and index the documentation with:
+
+```powershell
+.\venv\Scripts\python -m rio.reference            # checks out the commits this repo pins, then indexes
+.\venv\Scripts\python -m rio.reference --status   # what is on disk; changes nothing
+```
+
+It needs Git on the machine and `github.com` reachable. The checkout downloads about 90 MB. The
+index reads the top of every page: 439 seconds the first time on the development machine, straight
+after the checkout, and 5 seconds on a later run. It lives in `.\state\` and rio turns
+`docs_search` off when the documentation no longer matches it, so run the command again after
+every `git pull` that moves a submodule.
+
+Without Git, or from a zip download of this repo (which has no submodule content), put a copy of
+each repository in a folder, set `RIO_DOCS_ROOT` and `RIO_EXAMPLES_ROOT` in `.env`, and run
+`python -m rio.reference --index-only`.
+
+The documentation is found by each page's title, description and file name, not by its text, so
+ask for the thing by name ("GlideRecord addEncodedQuery", "business rule"). A search returns the
+text of its best match, opened at the word the title didn't cover, because a turn has one round
+of tool calls; `reference_read` gets the next part, or another result, on the next turn.
+
+**Keeping the two current.** The submodules are pinned to a commit. The
+`Reference submodules staleness` workflow compares each pin with its upstream branch every Monday
+and keeps one issue open while either is behind, with the commands to move it:
+
+```powershell
+git -c core.longpaths=true submodule update --remote --depth 1 -- servicenow-docs servicenow-sdk-examples
+git add servicenow-docs servicenow-sdk-examples   # then commit on a branch and open a PR
+```
+
+When a new release family goes GA, ServiceNow adds a branch and later deletes the oldest; change
+`branch` for `servicenow-docs` in `.gitmodules` then.
+
 ## Status
 
 - **Ollama client and chat loop:** capability-aware, local only, with the decode rate on every reply.
@@ -93,6 +137,9 @@ files; the others (properties, roles, catalog) are skipped if your user can't re
   - from the live instance: `now_query`, `now_get`, `now_aggregate`;
   - from the instance-config snapshot: `now_field_exists`, `now_choice_values`;
   - one write: `now_update`.
+- **Reference:** `docs_search` over the ServiceNow documentation, `examples_search` over the Fluent
+  SDK samples, and `reference_read` for more of either. They read files on this machine and need
+  no instance.
 - **Status card:** type a record number (`INC0010023`, `status of CHG0000023`) and rio shows that
   record's card itself, with no model turn: type, state, priority, short description, assignee
   and group, the latest work note or comment, and the link. It works for any task record (INC,
