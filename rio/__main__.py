@@ -13,12 +13,13 @@ import requests
 
 from rio import approval, commands, config, turn
 from rio.llm import capabilities
-from rio.tools import TOOLS, now, sn
+from rio.tools import TOOLS, now, reference, sn
 
 SYSTEM = ("You are rio, a ServiceNow engineering companion running locally. Answer briefly and say "
           "when you do not know. Use the tools to look things up on the instance instead of guessing; "
-          "never invent table or field names. A change to the instance needs the operator's approval "
-          "on a card, so propose it with the tool and let the card ask.")
+          "never invent table or field names. For how the platform, an API or the Fluent SDK works, look "
+          "it up with the documentation and sample tools when they are offered. A change to the instance "
+          "needs the operator's approval on a card, so propose it with the tool and let the card ask.")
 
 _PLAIN_NO = re.compile(r"\s*(n|no)\s*[.!]?\s*$", re.IGNORECASE)
 # What reaches the screen, whatever its route: the card cleans its own fields, but instance text also
@@ -55,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
     show(f"capabilities: {', '.join(sorted(caps)) or '(none reported)'}")
     problem = config.sn_config_problem()
     show(f"servicenow: {'configured for ' + config.sn_instance_url() if not problem else 'not configured: ' + problem}")
-    show(*now.load(), *sn.load())
+    show(*now.load(), *sn.load(), *reference.load())
     if TOOLS and "tools" not in caps:
         show(f"note: {config.MODEL} does not list 'tools', so the tools above are not offered to it")
     show("type a message; /quit to leave\n")

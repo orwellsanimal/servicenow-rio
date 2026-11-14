@@ -78,6 +78,14 @@ servicenow-coder and what is left behind; decisions are in [`docs/architecture/`
   through `record_number()`; anything else that isn't a sys_id goes through `query_safe()`, or is
   doubled (`^^`) when it must be looked up exactly. `tests/conftest.py` fails any test that opens a
   connection, so a default argument bound to the real client shows up at once.
+- **The two submodules are ServiceNow's, and one is 600 MB.** `servicenow-docs` and
+  `servicenow-sdk-examples` are read, never edited; a bump is a commit of the pointer (ADR-0004,
+  README "Keeping the two current"). The suite doesn't need them checked out: `tests/test_reference.py`
+  builds its own small tree. Run `pytest tests/`, not bare `pytest`, which walks 52,774 pages looking
+  for tests. Open their files through `rio.reference._long()`: the longest page path is 197
+  characters below the docs folder, past Windows' 260 from most checkouts. A search tool returns the
+  text of its best match because a turn has one tool round; a tool that returns only pointers leaves
+  the model to answer from memory, and it will (measured: invented Fluent properties).
 - **Carried code keeps its receipts.** A module copied from whitcortex keeps the issue numbers in
   its comments (`#2597`, `#2627`, `#2630`, `#2643`); they point at the measured evidence that
   shaped it. Trim the code, not the history.

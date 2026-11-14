@@ -1,0 +1,133 @@
+# Reference submodules staleness tracker (notify-only)
+#
+# servicenow-docs and servicenow-sdk-examples are pinned to a commit (ADR-0004). This compares each
+# pin with the head of its branch in .gitmodules and keeps ONE tracker issue: created when a pin
+# falls behind, its body rewritten on every run, reopened if it was closed and a pin is behind again.
+# A human closes it after merging the bump.
+#
+# It opens no pull request: Actions in this repository may not create them, and the documentation
+# is republished about monthly, so a person looking once a month is the right amount of attention.
+# Adapted from servicenow-coder's submodule-docs-staleness.yml.
+#
+# Trigger: Mondays 14:00 UTC, or `gh workflow run "Reference submodules staleness" --ref main`.
+
+name: Reference submodules staleness
+
+on:
+  schedule:
+    - cron: '0 14 * * 1'  # Mondays 14:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  TRACKER_TITLE: "Reference submodules are behind upstream"
+  SUBMODULES: "servicenow-docs servicenow-sdk-examples"
+
+jobs:
+  check:
+    name: Compare each pin with upstream and upsert the tracker
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout parent (no submodules)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: false
+
+      - name: Compare pinned vs upstream and upsert tracker issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          now=$(date -u +'%Y-%m-%d %H:%M UTC')
+          body_file=$(mktemp)
+          any_stale=false
+          behind=()
+          {
+            echo "_Last checked: ${now} by [\`reference-staleness\`](https://github.com/${REPO}/actions/runs/${RUN_ID})._"
+            echo
+          } > "$body_file"
+
+          for sm in $SUBMODULES; do
+            pinned=$(git ls-tree HEAD "$sm" | awk '{print $3}')
+            branch=$(git config -f .gitmodules "submodule.${sm}.branch")
+            url=$(git config -f .gitmodules "submodule.${sm}.url")
+            upstream=$(git ls-remote "$url" "refs/heads/${branch}" | awk '{print $1}')
+
+            # A missing branch is not "up to date": ServiceNow deletes the oldest release branch
+            # when a new family goes GA, and the pin in .gitmodules then needs a human.
+            if [ -z "$pinned" ] || [ -z "$upstream" ]; then
+              echo "::error::${sm}: could not resolve SHAs (pinned='${pinned}' upstream='${upstream}'); is branch '${branch}' still at ${url}?"
+              exit 1
+            fi
+
+            {
+              echo "## \`${sm}\` (\`${branch}\`)"
+              echo
+              if [ "$pinned" = "$upstream" ]; then
+                echo "Up to date at \`${pinned}\`."
+              else
+                echo "**Behind upstream.**"
+                echo
+                echo "- Pinned: \`${pinned}\`"
+                echo "- Upstream: \`${upstream}\`"
+                echo "- Compare: ${url%.git}/compare/${pinned}...${upstream}"
+              fi
+              echo
+            } >> "$body_file"
+
+            if [ "$pinned" != "$upstream" ]; then
+              any_stale=true
+              behind+=("$sm")
+            fi
+            echo "${sm}: pinned=${pinned} upstream=${upstream}"
+          done
+
+          if [ "$any_stale" = "true" ]; then
+            {
+              echo "## How to bump"
+              echo
+              echo '```bash'
+              echo "git checkout -b chore/bump-reference-submodules"
+              echo "git -c core.longpaths=true submodule update --remote --depth 1 -- ${behind[*]}"
+              echo "git add ${behind[*]}"
+              echo "git commit -m \"chore: bump ${behind[*]} to upstream\""
+              echo '```'
+              echo
+              echo "Then on each machine, after pulling: \`python -m rio.reference\` (checks out the new pins and re-indexes the documentation)."
+            } >> "$body_file"
+          fi
+
+          # One tracker, found by its exact title among open and closed issues.
+          issues_json=$(gh issue list --state all --search "\"${TRACKER_TITLE}\" in:title" \
+            --json number,state,title --limit 50 \
+            | jq --arg title "$TRACKER_TITLE" '[.[] | select(.title == $title)]')
+          count=$(echo "$issues_json" | jq 'length')
+          case "$count" in
+            0) number=""; state="" ;;
+            1) number=$(echo "$issues_json" | jq -r '.[0].number'); state=$(echo "$issues_json" | jq -r '.[0].state') ;;
+            *)
+              echo "::error::Found $count issues titled '$TRACKER_TITLE'; expected 0 or 1. Close or rename the extras:"
+              echo "$issues_json" | jq -r '.[] | "  #\(.number) [\(.state)]"'
+              exit 1
+              ;;
+          esac
+          echo "tracker=${number:-<none>} state=${state:-<n/a>} stale=${any_stale}"
+
+          if [ -z "$number" ]; then
+            if [ "$any_stale" = "true" ]; then
+              gh issue create --title "$TRACKER_TITLE" --label chore --body-file "$body_file"
+            else
+              echo "No tracker and nothing behind: nothing to do."
+            fi
+          else
+            gh issue edit "$number" --body-file "$body_file"
+            if [ "$state" = "CLOSED" ] && [ "$any_stale" = "true" ]; then
+              gh issue reopen "$number"
+            fi
+          fi

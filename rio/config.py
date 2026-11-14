@@ -34,6 +34,11 @@ INSTANCE_CONFIG_ROOT: str = os.getenv("INSTANCE_CONFIG_ROOT", "").strip()
 # ticket text (the evidence quotes), so it stays local and is gitignored, like the snapshot.
 STATE_DIR: Path = Path(os.getenv("RIO_STATE_DIR", "").strip() or ROOT / "state").expanduser()
 
+# The ServiceNow documentation and the Fluent SDK samples the reference tools read (#27): the two
+# submodules, or a folder holding a copy of each on a machine without Git.
+DOCS_ROOT: Path = Path(os.getenv("RIO_DOCS_ROOT", "").strip() or ROOT / "servicenow-docs").expanduser()
+EXAMPLES_ROOT: Path = Path(os.getenv("RIO_EXAMPLES_ROOT", "").strip() or ROOT / "servicenow-sdk-examples").expanduser()
+
 # ── ServiceNow identity ──────────────────────────────────────────────────────
 SN_INSTANCE: str = os.getenv("SN_INSTANCE", "").strip()
 SN_IDENTITY: str = os.getenv("SN_IDENTITY", "").strip().lower() or "human"
