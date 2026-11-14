@@ -2,13 +2,13 @@
 # reference tools (#27, ADR-0004). `python -m rio.reference [--status] [--index-only]` checks the
 # two submodules out and builds the documentation index.
 #
-#   servicenow-docs/           ServiceNow/ServiceNowDocs, one markdown file per page (52,776 on brazil)
+#   servicenow-docs/           ServiceNow/ServiceNowDocs, one markdown file per page (52,774 on brazil)
 #   servicenow-sdk-examples/   ServiceNow/sdk-examples, one folder per sample
 #
 # Reading 613 MB of markdown per question is not an option on the laptop, so a page is found by its
 # front matter (title, description, product) and its path, which this indexes once per commit into
-# state/. The page itself is read only when the model asks for it, a window at a time. The samples
-# are 358 small files and are searched in full.
+# state/. Only the page a search picks is opened, and read a window at a time. The samples are 358
+# small files and are searched in full.
 #
 # Standard library only (ADR-0002): no vector store, whose wheels are compiled.
 
@@ -29,8 +29,10 @@ SUBMODULES = ("servicenow-docs", "servicenow-sdk-examples")
 INDEX_NAME = "docs_index.jsonl"
 INDEX_VERSION = 1
 
-# The front matter is the first thing in a page and is short; the longest measured was under 2 KB.
-_HEAD_BYTES = 4096
+# The front matter is the first thing in a page. On brazil 36 of 52,774 pages carry more than 4096
+# bytes of it (a long breadcrumb or description). A page that runs past this is still indexed, by
+# the keys that came first; the title is the first key.
+_HEAD_BYTES = 16384
 _FRONT_KEYS = ("title", "description", "product", "canonical_url")
 
 # What a tool may put in the context window is capped at 6000 characters by execute_tool; a read
@@ -576,6 +578,12 @@ def _git_checkout(names: list[str]) -> str:
                 "and set RIO_DOCS_ROOT / RIO_EXAMPLES_ROOT in .env")
     if done.returncode != 0:
         return f"`{' '.join(cmd)}` failed ({done.returncode}): {(done.stderr or done.stdout).strip()[-600:]}"
+    # The checkout above wrote the long paths; without the setting in the submodule's own config a
+    # later `git status` can't stat them and reports the submodule as modified (measured from a
+    # checkout whose longest path came to 340 characters: 95 pages " M", none of them changed).
+    for name in names:
+        subprocess.run(["git", "-C", name, "config", "core.longpaths", "true"],
+                       cwd=config.ROOT, capture_output=True, text=True)
     return ""
 
 

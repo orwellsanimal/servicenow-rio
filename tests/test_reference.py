@@ -358,7 +358,9 @@ def test_the_command_checks_out_the_pinned_commits_shallow_then_indexes(tree, mo
     calls = []
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: calls.append((cmd, kw)) or Done())
     assert reference.main([]) == 0
-    (cmd, kw), = calls
+    (cmd, kw), *settings = calls
+    assert [c for c, _ in settings] == [["git", "-C", name, "config", "core.longpaths", "true"]
+                                        for name in ("servicenow-docs", "servicenow-sdk-examples")]
     assert cmd == ["git", "-c", "core.longpaths=true", "submodule", "update", "--init", "--depth", "1", "--",
                    "servicenow-docs", "servicenow-sdk-examples"]
     assert "--remote" not in cmd and kw["cwd"] == tree       # the pin, not upstream's head
