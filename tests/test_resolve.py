@@ -262,7 +262,7 @@ def test_a_non_admin_resolves_without_reading_or_writing_any_tag(inst):
     assert "tags first" not in card.preview and "alert: Alert0010006 (Open)" in card.preview
     assert result.split("\n") == [
         "INC0010049 is now Resolved (Known error).",
-        "Not tagged: as the card said, tags need an admin account (rio#30).",
+        f"Not tagged, as the card said: {tags.NOT_ADMIN}.",
         "Alert Alert0010006: Open before, Open now."]
     assert _incident(inst)["state"][0] == "6"
     assert inst.queries("label") == [] and inst.queries("label_entry") == []
@@ -317,4 +317,70 @@ def test_a_card_that_said_no_tags_never_tags_even_if_the_account_became_admin(in
     inst.tables["sys_user_has_role"].append({"sys_id": "f3" * 16, "user": RIO_USER_ID, "role": tags.ADMIN_ROLE,
                                              "state": "active"})
     result = approval.answer(card, "y")
-    assert "Not tagged: as the card said" in result and inst.writes("now_insert") == []
+    assert "Not tagged, as the card said: this account isn't an admin" in result and inst.writes("now_insert") == []
+
+
+# ── PR #31 review ─────────────────────────────────────────────────────────────────────────────────
+
+def test_an_admin_card_answered_after_admin_was_lost_is_refused_and_writes_nothing(inst):
+    """The card said "tags first"; the account lost admin before `y`: tagging now would write an empty
+    label_entry row (rio#30), so nothing is written."""
+    card = approval.park("sn_resolve", {"number": "INC0010049"})
+    assert "tags first" in card.preview
+    _not_admin(inst)
+    result = approval.answer(card, "y")
+    assert "said it would tag it, but now this account isn't an admin" in result and "nothing was changed" in result
+    assert inst.writes() == [] and inst.writes("now_insert") == [] and _incident(inst)["state"][0] == "1"
+
+
+def test_y_repeats_the_reason_the_card_gave(inst):
+    inst.refuse["sys_user_has_role"] = RuntimeError("boom")
+    card, result = _card_and_yes()
+    why = tags.can_tag()
+    assert f"tags: not written: {why}" in card.preview
+    assert f"Not tagged, as the card said: {why}." in result.split("\n")
+
+
+def test_a_failed_account_lookup_means_no_tags(inst):
+    inst.refuse["sys_user"] = RuntimeError("boom")
+    assert tags.can_tag().startswith("whether this account may tag couldn't be checked (ToolError: ")
+    assert inst.queries("sys_user_has_role") == []
+
+
+def test_a_row_the_query_should_not_have_returned_is_not_proof(inst, monkeypatch):
+    """If the instance ignored a term, the rows would not match it: checked in code (PR #31 review)."""
+    real = tags.rows
+
+    def widened(table, query, fields, limit):
+        if table == "sys_user":
+            return [{"sys_id": {"value": "9" * 32, "display": ""}, "user_name": {"value": "someone.else", "display": ""}}]
+        return real(table, query, fields, limit)
+    monkeypatch.setattr(tags, "rows", widened)
+    assert "wasn't found once" in tags.can_tag()
+
+    def any_role(table, query, fields, limit):
+        if table == "sys_user_has_role":
+            return [{"sys_id": {"value": "8" * 32, "display": ""}, "user": {"value": RIO_USER_ID, "display": ""},
+                     "role": {"value": "282bf1fac6112285017366cb5f867469", "display": ""},
+                     "state": {"value": "active", "display": ""}}]
+        return real(table, query, fields, limit)
+    monkeypatch.setattr(tags, "rows", any_role)
+    assert tags.can_tag() == tags.NOT_ADMIN
+
+
+def test_the_user_name_match_ignores_case(inst, monkeypatch):
+    monkeypatch.setattr(config, "sn_credentials", lambda: ("RIO.TEST", "pw"))
+    inst.tables["sys_user"][0]["user_name"] = "RIO.TEST"
+    assert tags.can_tag() == ""
+
+
+def test_a_non_admin_card_on_a_resolved_incident_is_refused(inst):
+    _not_admin(inst)
+    _incident(inst)["state"] = ("6", "Resolved")
+    out = approval.park("sn_resolve", {"number": "INC0010049"})
+    assert isinstance(out, str) and "it is already Resolved" in out and inst.writes() == []
+
+
+def test_an_exception_on_the_card_is_terminal_safe(inst):
+    inst.refuse["sys_user_has_role"] = RuntimeError("bad\x1b[2Jthing")
+    assert "\x1b" not in tags.can_tag()

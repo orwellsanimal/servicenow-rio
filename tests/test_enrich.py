@@ -100,6 +100,7 @@ def inst(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "STATE_DIR", tmp_path / "state")
     monkeypatch.setattr(config, "sn_instance_url", lambda: "https://dev1.service-now.com")
     fake = FakeInstance(tables()).install(monkeypatch)
+    monkeypatch.setattr(g, "_TAG_SHOWN", {})          # what the cards showed, per test (PR #31 review)
 
     @register("now_query", group="servicenow", writes=False)
     def now_query(table: str) -> dict:
@@ -123,8 +124,8 @@ def test_the_dry_run_lists_what_each_gatherer_found_and_writes_nothing(inst):
     out = g.run("INC0000059", chat=model())
     assert _no_writes(inst)
     note = out["note"]
-    assert out["shown"].startswith("Enrichment DRY RUN (nothing written; to post it as a work note and tag "
-                                   "it, type: apply enrich INC0000059)\n")
+    assert out["shown"].startswith("Enrichment DRY RUN (nothing written; to post it as a work note (and tag "
+                                   "it, as an admin), type: apply enrich INC0000059)\n")
     lines = note.split("\n")
     assert lines[0] == "Enrichment (rio sn_enrich, local inference, rio#1, whitcortex #2630): INC0000059"
     assert lines[1] == "Search terms, from the ticket text: file share, folder, personal folder"
@@ -386,4 +387,23 @@ def test_a_non_admin_posts_the_note_and_says_it_was_not_tagged(inst):
     note, = inst.writes()
     assert note["values"] == {"work_notes": out["note"]}
     assert inst.writes("now_insert") == [] and inst.queries("label") == [] and inst.queries("label_entry") == []
-    assert ("Not tagged enriched-by-rio: as the card said, tags need an admin account (rio#30).") in shown[0]
+    assert f"Not tagged enriched-by-rio, as the card said: {tags.NOT_ADMIN}." in shown[0]
+
+
+def test_an_enrich_card_answered_after_admin_was_lost_writes_nothing(inst):
+    """PR #31 review: the card said it would tag; the account lost admin; the note isn't posted either."""
+    from rio import tags
+    g.run("INC0000059", chat=model())
+    shown, card = main.step("apply enrich INC0000059", [], None, CAPS, run=lambda *a, **k: pytest.fail("chat"))
+    assert "then tag it enriched-by-rio" in shown[0]
+    inst.tables["sys_user_has_role"] = [r for r in inst.tables["sys_user_has_role"] if r["role"] != tags.ADMIN_ROLE]
+    shown, _ = main.step("y", [], card, CAPS, run=lambda *a, **k: pytest.fail("chat"))
+    assert "said it would tag it enriched-by-rio, but now this account isn't an admin" in shown[0]
+    assert _no_writes(inst) and g.load_note("INC0000059") is not None and not g.load_note("INC0000059").get("sent_at")
+
+
+def test_apply_without_a_card_never_tags(inst):
+    g.run("INC0000059", chat=model())
+    out = g.apply("INC0000059", g.pending_id("INC0000059"))
+    assert "Not tagged enriched-by-rio, as the card said: no card for this note said it would tag." in out
+    assert inst.writes("now_insert") == []

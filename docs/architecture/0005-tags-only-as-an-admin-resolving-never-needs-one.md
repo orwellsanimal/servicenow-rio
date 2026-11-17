@@ -48,11 +48,14 @@ An admin's path is unchanged: tags first, then the state, so a failed tag still 
 unresolved.
 
 `y` does what the card said. A card that said "not tagged" never tags, even if the account became
-an admin while it waited. A card that said it would tag still checks again at `y` (enrich) or tags
-as shown (resolve).
+an admin while it waited, and `y` repeats the card's reason. A card that said it would tag checks
+again at `y`, before any write. If the account is no longer an admin, `y` is refused and nothing is
+written; the operator asks again and gets a "not tagged" card (PR #31 review).
 
 A failed check (the account can't read `sys_user.user_name`, a read error) answers "don't tag",
-never "go ahead". Skipping a tag costs a missing tag; guessing wrong costs another empty row.
+never "go ahead". Skipping a tag costs a missing tag; guessing wrong costs another empty row. The
+rows that come back are checked in code (the user name, user, role and state), so a query term the
+instance ignored can't make the wrong account, or any role, read as an admin.
 
 ## Consequences
 

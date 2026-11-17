@@ -31,9 +31,10 @@ RESOLVED = "6"
 # number -> (sys_id, sys_mod_count, tags) the card was shown for; in memory, like the card itself
 # (ADR-0003). The tags too: a CI renamed while the card waits doesn't touch the incident, and `y`
 # must not put on a tag the card never showed (PR #26 review). A card that said the tags won't be
-# written holds None: `y` then writes the state alone, whatever the account can do by then.
-_SHOWN: dict[str, tuple[str, str, tuple[str, ...] | None]] = {}
-NOT_TAGGED = "Not tagged: as the card said, tags need an admin account (rio#30)."
+# written holds None and the card's reason: `y` writes the state alone, whatever the account can do
+# by then, and repeats that reason. A card that said it would tag asks again at `y`: an account that
+# lost admin since would write an empty row (rio#30), so that is refused (PR #31 review).
+_SHOWN: dict[str, tuple[str, str, tuple[str, ...] | None, str]] = {}
 
 
 def read_alert(incident_sys_id: str) -> dict | None:
@@ -96,11 +97,11 @@ def preview(number: str) -> str:
             f"Resolved, with its recorded close code {safe(record['close_code']['display'])!r}")
     if no_tags:
         # No label read either: a non-admin may not even read label's fields (rio#29).
-        _SHOWN[number] = (record["sys_id"]["value"], record["sys_mod_count"]["value"], None)
+        _SHOWN[number] = (record["sys_id"]["value"], record["sys_mod_count"]["value"], None, no_tags)
         would = f"; they would be: {', '.join(tags)}" if tags else ""
         return "\n".join([head, f"  tags: not written: {no_tags}{would}", _alert_line(alert)])
     plan = tagging.plan("incident", record["sys_id"]["value"], tags)
-    _SHOWN[number] = (record["sys_id"]["value"], record["sys_mod_count"]["value"], tuple(tags))
+    _SHOWN[number] = (record["sys_id"]["value"], record["sys_mod_count"]["value"], tuple(tags), "")
     lines = [head, f"  tags first: {', '.join(tags)}"]
     kept = {t.lower() for t in tags}
     dropped = [safe(t) for t in _raw_tags(record, alert) if safe(t)[:tagging.LABEL_MAX].strip().lower() not in kept]
@@ -125,7 +126,7 @@ def run(number: str) -> str:
     shown = _SHOWN.pop(number, None)
     if shown is None:
         raise ToolError(f"no card was shown for resolving {number}; ask again")
-    shown_id, shown_count, shown_tags = shown
+    shown_id, shown_count, shown_tags, shown_reason = shown
     record, alert, tags = _ready(number, shown_tags is not None)
     count = record["sys_mod_count"]["value"]
     # The same record, unchanged since the card: not another record that now has this number, and
@@ -136,9 +137,14 @@ def run(number: str) -> str:
     if shown_tags is not None and tuple(tags) != shown_tags:
         raise ToolError(f"the tags for {number} changed after the card was shown ({', '.join(shown_tags)} -> "
                         f"{', '.join(tags)}); nothing was changed. Ask again.")
+    if shown_tags is not None:
+        now = tagging.can_tag()
+        if now:
+            raise ToolError(f"the card for {number} said it would tag it, but now {now}; nothing was changed. "
+                            "Ask again.")
     sys_id = record["sys_id"]["value"]
     if shown_tags is None:
-        tagged = NOT_TAGGED             # what the card said, even if the account could tag by now
+        tagged = f"Not tagged, as the card said: {shown_reason}."   # even if the account could tag by now
     else:
         try:
             tagged = tagging.tag("incident", sys_id, number, tags)
