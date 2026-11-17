@@ -18,7 +18,7 @@ from rio.tools.errors import ToolError
 
 pytest.importorskip("now_data.verbs")
 
-from fake_instance import FakeInstance  # noqa: E402
+from fake_instance import FakeInstance, account  # noqa: E402
 from rio import __main__ as main, approval, enrich as g  # noqa: E402
 from rio.tools import sn  # noqa: E402
 
@@ -60,8 +60,8 @@ def tables():
             # still New: never a similar RESOLVED incident
             _incident("INC0000103", ("1", "New"), "File share down again", "", (OTHER, "Other"), ("network", "Network")),
         ],
-        "sys_user": [{"sys_id": RICK, "name": "Rick Berzle", "department": ("d" * 32, "Sales"),
-                      "location": ("e" * 32, "945 South Birch Street, Glendale,CO"), "title": ""}],
+        **account(users=[{"sys_id": RICK, "name": "Rick Berzle", "department": ("d" * 32, "Sales"),
+                          "location": ("e" * 32, "945 South Birch Street, Glendale,CO"), "title": ""}]),
         "cmdb_ci": [
             {"sys_id": "f" * 32, "name": "FileServerFloor1", "sys_class_name": ("cmdb_ci_server", "Server"),
              "short_description": "1st Floor File Server", "operational_status": "1", "assigned_to": ""},
@@ -263,6 +263,7 @@ def test_an_unconfirmed_note_is_said_plainly_and_nothing_else_runs(inst):
 def test_a_failed_tagging_says_the_note_landed(inst):
     g.run("INC0000059", chat=model())
     inst.insert_override = {"label": {"active": "false"}}
+    g.preview("INC0000059", g.pending_id("INC0000059"))      # the card said it would tag
     with pytest.raises(ToolError) as caught:
         g.apply("INC0000059", g.pending_id("INC0000059"))
     assert str(caught.value).startswith("The work note is on INC0000059, but the tag may or may not be on it: "
@@ -372,3 +373,17 @@ def test_a_corrupt_note_file_is_a_refusal_not_a_crash(inst):
 def test_a_caller_that_is_not_a_sys_id_is_not_looked_up(inst):
     assert g.caller_context({"caller_id": {"value": "x^ORactive=true", "display": ""}}) == {}
     assert inst.queries("sys_user") == []
+
+
+def test_a_non_admin_posts_the_note_and_says_it_was_not_tagged(inst):
+    """rio#30: tagging needs admin on a stock instance; the note doesn't."""
+    from rio import tags
+    inst.tables["sys_user_has_role"] = [r for r in inst.tables["sys_user_has_role"] if r["role"] != tags.ADMIN_ROLE]
+    out = g.run("INC0000059", chat=model())
+    shown, card = main.step("apply enrich INC0000059", [], None, CAPS, run=lambda *a, **k: pytest.fail("chat"))
+    assert "not tagged enriched-by-rio: this account isn't an admin" in shown[0] and "then tag it" not in shown[0]
+    shown, _ = main.step("y", [], card, CAPS, run=lambda *a, **k: pytest.fail("chat"))
+    note, = inst.writes()
+    assert note["values"] == {"work_notes": out["note"]}
+    assert inst.writes("now_insert") == [] and inst.queries("label") == [] and inst.queries("label_entry") == []
+    assert ("Not tagged enriched-by-rio: as the card said, tags need an admin account (rio#30).") in shown[0]

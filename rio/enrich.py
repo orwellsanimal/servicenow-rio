@@ -38,6 +38,9 @@ from rio.tools.errors import ToolError
 from rio.tools.now import call_verb
 
 TAG = "enriched-by-rio"
+# number -> whether the card said it will tag (rio#30: only an admin can). `y` tags only when the card
+# said so AND the account still can: a card that said "not tagged" never tags.
+_TAG_SHOWN: dict[str, bool] = {}
 MAX_TERMS = 6
 MAX_SIMILAR = 5
 MAX_CIS = 8
@@ -524,14 +527,18 @@ def _plan(number: str, proposal: str) -> tuple[dict, dict]:
 def preview(number: str, proposal: str = "") -> str:
     saved, record = _plan(number, proposal)
     note = "\n".join(f"    {line}" for line in saved["note"].split("\n"))
+    no_tags = tagging.can_tag()
+    _TAG_SHOWN[record["number"]["value"]] = not no_tags
+    then = f"  then tag it {TAG}" if not no_tags else f"  not tagged {TAG}: {no_tags}"
     return (f"  post enrichment {saved['id']} as a work note on {record['number']['value']} "
-            f"(made {saved.get('created', 'earlier')}):\n{note}\n  then tag it {TAG}")
+            f"(made {saved.get('created', 'earlier')}):\n{note}\n{then}")
 
 
 def apply(number: str, proposal: str = "") -> str:
-    """ONE work note, THEN the tag; then every non-journal field compared with before."""
+    """ONE work note, THEN the tag (as an admin, rio#30); then every non-journal field compared with before."""
     saved, record = _plan(number, proposal)
     number, sys_id = record["number"]["value"], record["sys_id"]["value"]
+    tag_it = _TAG_SHOWN.pop(number, False)
     # Marked sent BEFORE it goes: if the outcome is unknown (a dropped connection, an unconfirmed
     # journal), the saved note can't be posted a second time (PR #26 review).
     _save(number, {**saved, "sent_at": datetime.now().isoformat(timespec="seconds")})
@@ -562,7 +569,9 @@ def apply(number: str, proposal: str = "") -> str:
     except OSError:
         pass                                   # still marked sent, so it can't be posted again either
     try:
-        tagged = tagging.tag("incident", sys_id, number, [TAG])
+        no_tags = "as the card said, tags need an admin account (rio#30)" if not tag_it else tagging.can_tag()
+        tagged = (f"Not tagged {TAG}: {no_tags}." if no_tags
+                  else tagging.tag("incident", sys_id, number, [TAG]))
     except Exception as e:
         # The tag insert itself may have landed and then failed to confirm (PR #26 review).
         raise ToolError(f"The work note is on {number}, but the tag may or may not be on it: {e}. Do not enrich "
