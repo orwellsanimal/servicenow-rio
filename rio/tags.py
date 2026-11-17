@@ -10,11 +10,47 @@ from __future__ import annotations
 
 from now_data import verbs as data
 
+from rio import config
 from rio.servicenow import is_sys_id, query_safe, rows, safe
 from rio.tools.errors import ToolError
 from rio.tools.now import call_verb
 
 LABEL_MAX = 40     # label.name's max_length (UI Meta, dev442835, 2026-10-19): longer is cut on insert
+
+# The OOTB `admin` role's sys_id, the same on every instance (sys_user_role, dev442835, 2026-11-17).
+# Matched by sys_id, not `role.name=admin`: that is a dot-walk into sys_user_role, which a non-admin
+# can't read, and a dot-walk on an unreadable target matches nothing (servicenow-coder lessons).
+ADMIN_ROLE = "2831a114c611228501d4ea6c309d626d"
+NOT_ADMIN = ("this account isn't an admin, and on a stock instance only an admin can put a tag on a record "
+             "(label_entry has no write ACL, so the Table API keeps the row and drops every field; rio#30)")
+
+
+def can_tag() -> str:
+    """"" when rio's account can put tags on a record, else why not.
+
+    Tagging is a `label_entry` insert. As a non-admin the instance creates the row and silently
+    drops every field (rio#30): an empty row nobody but an admin can delete. So rio tags only as an
+    admin, asked before any tag read or write. A failed check answers "not", never "go ahead": the
+    cost of skipping a tag is a missing tag, the cost of guessing wrong is another empty row.
+
+    The rows that come back are checked in code, not taken as proof that the query filtered: a term
+    the instance ignored would otherwise make any account, or any role, read as an admin (PR #31
+    review)."""
+    user = config.sn_credentials()[0]
+    if not user or not query_safe(user):
+        return "rio's account name can't be looked up, so whether it may tag is unknown"
+    try:
+        found = rows("sys_user", f"user_name={user}", ("sys_id", "user_name"), limit=2)
+        mine = [r["sys_id"]["value"] for r in found if r["user_name"]["value"].lower() == user.lower()]
+        if len(mine) != 1 or not is_sys_id(mine[0]):
+            return f"rio's account ({safe(user)}) wasn't found once, so whether it may tag is unknown"
+        me = mine[0]
+        roles = rows("sys_user_has_role", f"user={me}^role={ADMIN_ROLE}^state=active",
+                     ("sys_id", "user", "role", "state"), limit=1)
+    except Exception as e:
+        return f"whether this account may tag couldn't be checked ({type(e).__name__}: {safe(str(e))})"
+    admin = [r for r in roles if (r["user"]["value"], r["role"]["value"], r["state"]["value"]) == (me, ADMIN_ROLE, "active")]
+    return "" if admin else NOT_ADMIN
 
 
 def names(raw: list[str]) -> list[str]:

@@ -82,6 +82,7 @@ def test_a_failed_verification_read_after_both_writes_is_said(einst, monkeypatch
     import requests
     enrich.run("INC0000059", chat=model())
     note = enrich.pending_id("INC0000059")
+    enrich.preview("INC0000059", note)                                # the card: note, then tag (both writes)
     real = enrich.incident_record
     calls = {"n": 0}
 
@@ -92,6 +93,7 @@ def test_a_failed_verification_read_after_both_writes_is_said(einst, monkeypatch
         return real(number)
     monkeypatch.setattr(enrich, "incident_record", flaky)
     out = enrich.apply("INC0000059", note)
+    assert "Tagged INC0000059: enriched-by-rio." in out               # both writes happened
     assert "the enrichment note is posted" in out and "The verification read after the writes failed (ConnectionError" in out
 
 
@@ -160,7 +162,7 @@ def test_an_unreadable_mod_count_is_a_change_in_enrich_and_resolve(einst, monkey
 
 def test_resolve_refuses_an_unreadable_mod_count(rinst):
     card = approval.park("sn_resolve", {"number": "INC0010049"})
-    resolve._SHOWN["INC0010049"] = (resolve._SHOWN["INC0010049"][0], "", resolve._SHOWN["INC0010049"][2])
+    resolve._SHOWN["INC0010049"] = (resolve._SHOWN["INC0010049"][0], "", *resolve._SHOWN["INC0010049"][2:])
     _incident(rinst)["sys_mod_count"] = ""
     assert "changed after the card was shown" in approval.answer(card, "y")
 

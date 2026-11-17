@@ -14,7 +14,7 @@ from rio.tools import TOOLS, execute_tool, register
 
 pytest.importorskip("now_data.verbs")
 
-from fake_instance import FakeInstance  # noqa: E402
+from fake_instance import RIO_USER_ID, FakeInstance, account  # noqa: E402
 from rio import __main__ as main, approval, resolve as g, tags, turn  # noqa: E402
 from rio.tools import sn  # noqa: E402
 from rio.tools.errors import ToolError  # noqa: E402
@@ -32,6 +32,7 @@ def tables(**incident):
     row.update(incident)
     return {
         "incident": [row],
+        **account(),
         "em_alert": [{"sys_id": "e" * 32, "incident": INC, "number": "Alert0010006", "state": "Open",
                       "source": "WhitCortex-HostLogs"}],
         "label": [{"sys_id": "c1" * 16, "name": "Router", "viewable_by": "everyone", "type": "standard",
@@ -243,3 +244,143 @@ def test_a_dropped_connection_on_the_state_says_the_tags_landed(inst, monkeypatc
     _, result = _card_and_yes()
     assert result.startswith("Tool error (sn_resolve): Tagged INC0010049: ")
     assert "The resolve may not have been saved (ConnectionError: reset); check INC0010049's state" in result
+
+
+# ── A non-admin account (rio#30): resolving must not need admin ─────────────────────────────────
+
+def _not_admin(inst):
+    inst.tables["sys_user_has_role"] = [r for r in inst.tables["sys_user_has_role"] if r["role"] != tags.ADMIN_ROLE]
+
+
+def test_a_non_admin_resolves_without_reading_or_writing_any_tag(inst):
+    """On a stock instance a non-admin's label_entry insert keeps an empty row (rio#30), and it may not
+    read label's fields at all (rio#29): the card says so, and `y` writes the state alone."""
+    _not_admin(inst)
+    card, result = _card_and_yes()
+    assert "tags: not written: this account isn't an admin" in card.preview
+    assert "they would be: GT-AX11000, Router, WhitCortex-HostLogs, Known error" in card.preview
+    assert "tags first" not in card.preview and "alert: Alert0010006 (Open)" in card.preview
+    assert result.split("\n") == [
+        "INC0010049 is now Resolved (Known error).",
+        f"Not tagged, as the card said: {tags.NOT_ADMIN}.",
+        "Alert Alert0010006: Open before, Open now."]
+    assert _incident(inst)["state"][0] == "6"
+    assert inst.queries("label") == [] and inst.queries("label_entry") == []
+    assert inst.writes("now_insert") == []
+
+
+def test_a_non_admin_with_nothing_to_tag_still_resolves(inst):
+    _not_admin(inst)
+    # an admin is refused ("no tag can be derived"); a non-admin tags nothing, so it doesn't matter
+    _incident(inst).update(cmdb_ci=("", ""), category=("", ""), subcategory=("", ""),
+                           close_code=("Known error", "Known^error"))
+    inst.tables["em_alert"] = []
+    card, result = _card_and_yes()
+    assert "they would be" not in card.preview
+    assert result.startswith("INC0010049 is now Resolved") and _incident(inst)["state"][0] == "6"
+
+
+def test_the_admin_check_asks_for_this_account_and_the_admin_role_by_sys_id(inst):
+    """No dot-walk (`role.name=admin` matches nothing for an account that can't read sys_user_role)."""
+    assert tags.can_tag() == ""
+    user_q, = inst.queries("sys_user")
+    assert user_q["query"] == "user_name=rio.test"
+    role_q, = inst.queries("sys_user_has_role")
+    assert role_q["query"] == f"user={RIO_USER_ID}^role={tags.ADMIN_ROLE}^state=active"
+
+
+def test_an_inactive_admin_role_does_not_count(inst):
+    for r in inst.tables["sys_user_has_role"]:
+        r["state"] = "pending"
+    assert tags.can_tag() == tags.NOT_ADMIN
+
+
+@pytest.mark.parametrize("user, why", [
+    ("", "can't be looked up"), ("x^ORactive=true", "can't be looked up"), ("nobody", "wasn't found")])
+def test_an_account_that_cannot_be_found_is_not_tagged_with(inst, monkeypatch, user, why):
+    monkeypatch.setattr(config, "sn_credentials", lambda: (user, "pw"))
+    assert why in tags.can_tag()
+
+
+def test_a_failed_admin_check_means_no_tags_not_a_guess(inst):
+    inst.refuse["sys_user_has_role"] = RuntimeError("boom")
+    why = tags.can_tag()
+    assert why.startswith("whether this account may tag couldn't be checked (ToolError: ")
+    card, result = _card_and_yes()
+    assert f"tags: not written: {why}" in card.preview
+    assert result.startswith("INC0010049 is now Resolved") and inst.writes("now_insert") == []
+
+
+def test_a_card_that_said_no_tags_never_tags_even_if_the_account_became_admin(inst):
+    _not_admin(inst)
+    card = approval.park("sn_resolve", {"number": "INC0010049"})
+    inst.tables["sys_user_has_role"].append({"sys_id": "f3" * 16, "user": RIO_USER_ID, "role": tags.ADMIN_ROLE,
+                                             "state": "active"})
+    result = approval.answer(card, "y")
+    assert "Not tagged, as the card said: this account isn't an admin" in result and inst.writes("now_insert") == []
+
+
+# ── PR #31 review ─────────────────────────────────────────────────────────────────────────────────
+
+def test_an_admin_card_answered_after_admin_was_lost_is_refused_and_writes_nothing(inst):
+    """The card said "tags first"; the account lost admin before `y`: tagging now would write an empty
+    label_entry row (rio#30), so nothing is written."""
+    card = approval.park("sn_resolve", {"number": "INC0010049"})
+    assert "tags first" in card.preview
+    _not_admin(inst)
+    result = approval.answer(card, "y")
+    assert "said it would tag it, but now this account isn't an admin" in result and "nothing was changed" in result
+    assert inst.writes() == [] and inst.writes("now_insert") == [] and _incident(inst)["state"][0] == "1"
+
+
+def test_y_repeats_the_reason_the_card_gave(inst):
+    inst.refuse["sys_user_has_role"] = RuntimeError("boom")
+    card, result = _card_and_yes()
+    why = tags.can_tag()
+    assert f"tags: not written: {why}" in card.preview
+    assert f"Not tagged, as the card said: {why}." in result.split("\n")
+
+
+def test_a_failed_account_lookup_means_no_tags(inst):
+    inst.refuse["sys_user"] = RuntimeError("boom")
+    assert tags.can_tag().startswith("whether this account may tag couldn't be checked (ToolError: ")
+    assert inst.queries("sys_user_has_role") == []
+
+
+def test_a_row_the_query_should_not_have_returned_is_not_proof(inst, monkeypatch):
+    """If the instance ignored a term, the rows would not match it: checked in code (PR #31 review)."""
+    real = tags.rows
+
+    def widened(table, query, fields, limit):
+        if table == "sys_user":
+            return [{"sys_id": {"value": "9" * 32, "display": ""}, "user_name": {"value": "someone.else", "display": ""}}]
+        return real(table, query, fields, limit)
+    monkeypatch.setattr(tags, "rows", widened)
+    assert "wasn't found once" in tags.can_tag()
+
+    def any_role(table, query, fields, limit):
+        if table == "sys_user_has_role":
+            return [{"sys_id": {"value": "8" * 32, "display": ""}, "user": {"value": RIO_USER_ID, "display": ""},
+                     "role": {"value": "282bf1fac6112285017366cb5f867469", "display": ""},
+                     "state": {"value": "active", "display": ""}}]
+        return real(table, query, fields, limit)
+    monkeypatch.setattr(tags, "rows", any_role)
+    assert tags.can_tag() == tags.NOT_ADMIN
+
+
+def test_the_user_name_match_ignores_case(inst, monkeypatch):
+    monkeypatch.setattr(config, "sn_credentials", lambda: ("RIO.TEST", "pw"))
+    inst.tables["sys_user"][0]["user_name"] = "RIO.TEST"
+    assert tags.can_tag() == ""
+
+
+def test_a_non_admin_card_on_a_resolved_incident_is_refused(inst):
+    _not_admin(inst)
+    _incident(inst)["state"] = ("6", "Resolved")
+    out = approval.park("sn_resolve", {"number": "INC0010049"})
+    assert isinstance(out, str) and "it is already Resolved" in out and inst.writes() == []
+
+
+def test_an_exception_on_the_card_is_terminal_safe(inst):
+    inst.refuse["sys_user_has_role"] = RuntimeError("bad\x1b[2Jthing")
+    assert "\x1b" not in tags.can_tag()

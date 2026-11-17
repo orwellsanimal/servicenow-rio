@@ -157,6 +157,12 @@ When a new release family goes GA, ServiceNow adds a branch and later deletes th
 - **Resolve:** `resolve INC0010049` (or ask) shows a card that resolves an incident that already
   carries its close code and close notes, tagged from its own fields (CI, subcategory, alert source,
   close code). It never writes a resolution itself.
+- **Tags need an admin account; resolving doesn't.** On a stock instance only an admin can put a tag
+  on a record: a non-admin's tag insert keeps an empty row and drops every field, without an error
+  ([#30](https://github.com/orwellsanimal/servicenow-rio/issues/30),
+  [ADR-0005](docs/architecture/0005-tags-only-as-an-admin-resolving-never-needs-one.md)). So rio tags only when its
+  account holds `admin`. Otherwise the resolve and enrich cards say the tags won't be written, and `y`
+  still resolves the incident or posts the note. An `itil` account is enough for both.
 - **Writes:** a write waits on an approval card that shows its real dry-run diff, and only `y` runs it ([ADR-0003](docs/architecture/0003-a-write-runs-only-from-an-approved-card.md)). With `RIO_READ_ONLY=true` there are no writes at all; triage and enrich still give their dry runs.
 - **Next:** the Fluent SDK pipeline.
 

@@ -38,6 +38,11 @@ from rio.tools.errors import ToolError
 from rio.tools.now import call_verb
 
 TAG = "enriched-by-rio"
+# number -> why the card said it won't tag, or "" when it said it will (rio#30: only an admin can).
+# A card that said "not tagged" never tags, and `y` repeats its reason. A card that said it will tag
+# asks again before the note goes: an account that lost admin since is refused, nothing written (PR #31 review).
+_TAG_SHOWN: dict[str, str] = {}
+NO_CARD = "no card for this note said it would tag"
 MAX_TERMS = 6
 MAX_SIMILAR = 5
 MAX_CIS = 8
@@ -481,7 +486,8 @@ def run(number: str, *, chat=None) -> dict:
             "note": note, "readiness": readiness[0],
             "created": datetime.now().isoformat(timespec="seconds")})
     head = ("Enrichment DRY RUN (nothing written or kept; rio is read-only here)" if config.READ_ONLY else
-            f"Enrichment DRY RUN (nothing written; to post it as a work note and tag it, type: apply enrich {number})")
+            f"Enrichment DRY RUN (nothing written; to post it as a work note (and tag it, as an admin), type: "
+            f"apply enrich {number})")
     return {"number": number, "terms": terms, "findings": findings, "readiness": readiness[0],
             "note": note, "shown": f"{head}\n{note}"}
 
@@ -524,14 +530,23 @@ def _plan(number: str, proposal: str) -> tuple[dict, dict]:
 def preview(number: str, proposal: str = "") -> str:
     saved, record = _plan(number, proposal)
     note = "\n".join(f"    {line}" for line in saved["note"].split("\n"))
+    no_tags = tagging.can_tag()
+    _TAG_SHOWN[record["number"]["value"]] = no_tags
+    then = f"  then tag it {TAG}" if not no_tags else f"  not tagged {TAG}: {no_tags}"
     return (f"  post enrichment {saved['id']} as a work note on {record['number']['value']} "
-            f"(made {saved.get('created', 'earlier')}):\n{note}\n  then tag it {TAG}")
+            f"(made {saved.get('created', 'earlier')}):\n{note}\n{then}")
 
 
 def apply(number: str, proposal: str = "") -> str:
-    """ONE work note, THEN the tag; then every non-journal field compared with before."""
+    """ONE work note, THEN the tag (as an admin, rio#30); then every non-journal field compared with before."""
     saved, record = _plan(number, proposal)
     number, sys_id = record["number"]["value"], record["sys_id"]["value"]
+    no_tags = _TAG_SHOWN.pop(number, NO_CARD)
+    if not no_tags:
+        now = tagging.can_tag()
+        if now:
+            raise ToolError(f"the card for {number} said it would tag it {TAG}, but now {now}; nothing was "
+                            f"written. Type `apply enrich {number}` again.")
     # Marked sent BEFORE it goes: if the outcome is unknown (a dropped connection, an unconfirmed
     # journal), the saved note can't be posted a second time (PR #26 review).
     _save(number, {**saved, "sent_at": datetime.now().isoformat(timespec="seconds")})
@@ -562,7 +577,8 @@ def apply(number: str, proposal: str = "") -> str:
     except OSError:
         pass                                   # still marked sent, so it can't be posted again either
     try:
-        tagged = tagging.tag("incident", sys_id, number, [TAG])
+        tagged = (f"Not tagged {TAG}, as the card said: {no_tags}." if no_tags
+                  else tagging.tag("incident", sys_id, number, [TAG]))
     except Exception as e:
         # The tag insert itself may have landed and then failed to confirm (PR #26 review).
         raise ToolError(f"The work note is on {number}, but the tag may or may not be on it: {e}. Do not enrich "

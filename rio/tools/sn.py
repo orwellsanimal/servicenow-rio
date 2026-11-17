@@ -57,7 +57,8 @@ def load() -> list[str]:
     def sn_resolve(number: str) -> str:
         """Resolve an incident that ALREADY carries its close code and close notes, and tag it from its own fields. The operator approves it on a card first.
 
-        Tags: its CI, subcategory (else category), alert source and close code. It never writes a
+        Tags, only when rio's account is an admin (otherwise it resolves untagged and says so): its
+        CI, subcategory (else category), alert source and close code. It never writes a
         resolution itself: an incident without one, or already resolved, is refused and nothing
         changes. Reports whether the linked Event Management alert closed (whitcortex #2627).
 
@@ -81,7 +82,7 @@ def load() -> list[str]:
     @register("sn_enrich_apply", group="servicenow", writes=True, preview=enrich.preview,
               operator_only=True)
     def sn_enrich_apply(number: str, proposal: str = "") -> str:
-        """Post the saved enrichment note on an incident and tag it, if it hasn't changed since.
+        """Post the saved enrichment note on an incident (and tag it, as an admin), if it hasn't changed since.
 
         Args:
           number: incident number, e.g. INC0000059

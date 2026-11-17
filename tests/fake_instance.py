@@ -46,7 +46,25 @@ COLUMNS = {
     "label": {"name", "viewable_by", "type", "active", "owner"},
     "label_entry": {"label", "table", "table_key", "title", "url"},
     "em_alert": {"number", "state", "source", "incident"},
+    "sys_user": {"user_name", "name"},
+    "sys_user_has_role": {"user", "role", "state"},
 }
+
+# rio's own account on the fake instance; install() makes it the one config.sn_credentials() names.
+RIO_USER = "rio.test"
+RIO_USER_ID = "f0" * 16
+ADMIN_ROLE = "2831a114c611228501d4ea6c309d626d"     # the OOTB admin role (rio.tags.ADMIN_ROLE)
+
+
+def account(admin: bool = True, users: list[dict] | None = None) -> dict:
+    """The sys_user and sys_user_has_role rows for rio's account: an admin by default, which is what
+    lets rio tag (rio#30). `users` are other sys_user rows a fixture needs."""
+    roles = [{"sys_id": "f1" * 16, "user": RIO_USER_ID, "role": "282bf1fac6112285017366cb5f867469",
+              "state": "active"}]                                       # itil, which tags nothing
+    if admin:
+        roles.append({"sys_id": "f2" * 16, "user": RIO_USER_ID, "role": ADMIN_ROLE, "state": "active"})
+    return {"sys_user": [{"sys_id": RIO_USER_ID, "user_name": RIO_USER, "name": "Rio Test"}, *(users or [])],
+            "sys_user_has_role": roles}
 
 
 def _parts(raw) -> tuple[str, str]:
@@ -334,6 +352,9 @@ class FakeInstance:
 
     def install(self, monkeypatch) -> "FakeInstance":
         from now_data import verbs
+
+        from rio import config
+        monkeypatch.setattr(config, "sn_credentials", lambda: (RIO_USER, "not-a-password"))
         monkeypatch.setattr(verbs, "now_query", self.now_query)
         monkeypatch.setattr(verbs, "now_get", self.now_get)
         monkeypatch.setattr(verbs, "now_aggregate", self.now_aggregate)
